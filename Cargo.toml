@@ -1,0 +1,26 @@
+[package]
+name = "ban2bgp"
+version = "0.1.0"
+authors = ["Vladimir Melnikov <wlad.w.m@gmail.com>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wladwm/bgp2bgp"
+keywords = ["BGP"]
+categories = ["networking"]
+description = "BGP blackholer temporary injects given banned IP addresses as blackhole routes into your network to pevent black hats to compromise your services"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+zettabgp = { version = "0.1.2" }
+tokio = { version = "1.5.0", features = ["full"] }
+tokio-util = "0.6.6"
+hyper = { version = "0.14.5", features = ["full"] }
+futures = "0.3.14"
+futures-util = "0.3.14"
+chrono = "0.4.19"
+ini = { version = "1.3.0"}
+html-escape = "0.2.9"
+url = "2.2.1"
+serde = { version = "1.0.125", features = ["derive"] }
+serde_json = "1.0.64"
