@@ -32,6 +32,7 @@ router bgp 65535
   neighbor 10.1.1.1 route-reflector-client
 ```
 Now on PC with Linux or FreeBSD:
+```
 $ git clone https://github.com/wladwm/ban2bgp
 ... git messages
 $ cd ban2bgp
@@ -49,7 +50,10 @@ skiplist=10.0.0.0/24
 EOF
 
 $ cargo run
-
+Listening on http://0.0.0.0:8080
+Connecting to 10.0.0.1:179
+Connected to 10.0.0.1:179
+```
 
 After this you can check on your router that BGP session with 10.1.1.1 is established.
 Add denyroute for host 10.2.2.2 for an hour:
@@ -97,6 +101,10 @@ Main section parameters:
 
 * /api/ping
   Checks service liveness. Returns "pong"
+    
+* /api/status
+  Returns JSON object with per peer status and count opf ipv4 and ipv6 routes
+  {'peers':{'10.0.0.1':'InSync'},'routes':{'ipv4':0,'ipv6':0}}
     
 * /api/dumprib
   Returns text table with active routes and times

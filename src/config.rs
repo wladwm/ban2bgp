@@ -4,10 +4,27 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum PeerMode {
+    Blackhole,
+    FlowSource,
+}
+impl FromStr for PeerMode {
+    type Err = ErrorConfig;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "blackhole" => Ok(PeerMode::Blackhole),
+            "flowsource" => Ok(PeerMode::FlowSource),
+            _ => Err(ErrorConfig::from_str("invalid peer mode")),
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct ConfigPeer {
     pub peeraddr: IpAddr,
     pub peeras: u32,
+    pub mode: PeerMode,
 }
 #[derive(Debug, Clone)]
 pub struct SvcConfig {
@@ -21,20 +38,47 @@ pub struct SvcConfig {
     pub communities: BgpCommunityList,
     pub httplisten: std::net::SocketAddr,
 }
-impl FromStr for ConfigPeer {
-    type Err = ErrorConfig;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let sp: Vec<&str> = s.split(" AS").collect();
-        if sp.len() != 2 {
-            return Err(ErrorConfig::from_str("invalid peer format (ip ASn)"));
-        }
+impl ConfigPeer {
+    pub fn from_section(sec: &HashMap<String, Option<String>>) -> Result<ConfigPeer, ErrorConfig> {
+        if !sec.contains_key("peer") {
+            return Err(ErrorConfig::from_str("missing peer IP address"));
+        };
+        if !sec.contains_key("as") {
+            return Err(ErrorConfig::from_str("missing peer as number"));
+        };
+        let peer: IpAddr = match sec["peer"] {
+            Some(ref s) => match s.parse() {
+                Ok(q) => q,
+                Err(_) => return Err(ErrorConfig::from_str("invalid peer IP address")),
+            },
+            None => return Err(ErrorConfig::from_str("missing peer IP address")),
+        };
+        let asn: u32 = match sec["as"] {
+            Some(ref s) => match s.parse() {
+                Ok(q) => q,
+                Err(_) => return Err(ErrorConfig::from_str("invalid peer as number")),
+            },
+            None => return Err(ErrorConfig::from_str("missing peer as number")),
+        };
+        let pmode: PeerMode = if sec.contains_key("mode") {
+            match sec["mode"] {
+                Some(ref s) => match s.parse() {
+                    Ok(q) => q,
+                    Err(_) => return Err(ErrorConfig::from_str("invalid peer mode")),
+                },
+                None => PeerMode::Blackhole,
+            }
+        } else {
+            PeerMode::Blackhole
+        };
         Ok(ConfigPeer {
-            peeraddr: sp[0].parse()?,
-            peeras: sp[1].parse()?,
+            peeraddr: peer,
+            peeras: asn,
+            mode: pmode,
         })
     }
 }
+
 #[derive(Debug)]
 pub enum ErrorConfig {
     Static(&'static str),
@@ -84,7 +128,10 @@ impl Error for ErrorConfig {
 
 impl SvcConfig {
     pub fn from_inifile(inifile: &str) -> Result<SvcConfig, ErrorConfig> {
-        let conf = ini!(inifile);
+        let conf = match ini!(safe inifile) {
+            Ok(c) => c,
+            Err(e) => return Err(ErrorConfig::from_string(e)),
+        };
         if !conf.contains_key("main") {
             return Err(ErrorConfig::from_str("Missing section 'main' in ini file"));
         }
@@ -144,8 +191,16 @@ impl SvcConfig {
         let peers: Vec<ConfigPeer> = if mainsection.contains_key("peers") {
             match mainsection["peers"] {
                 Some(ref s) => s
-                    .split(&[',', '\t'][..])
-                    .map(|cs| cs.parse::<ConfigPeer>())
+                    .split(&[',', ' ', '\t'][..])
+                    .map(|peername| {
+                        if conf.contains_key(peername) {
+                            Some(&conf[peername])
+                        } else {
+                            None
+                        }
+                    })
+                    .filter(|x| x.is_some())
+                    .map(|sect| ConfigPeer::from_section(sect.unwrap()))
                     .filter(|x| x.is_ok())
                     .map(|r| r.unwrap())
                     .collect(),
@@ -154,6 +209,7 @@ impl SvcConfig {
         } else {
             Vec::new()
         };
+
         let nh4: Ipv4Addr = if mainsection.contains_key("nexthop") {
             match mainsection["nexthop"] {
                 Some(ref s) => match s.parse() {

@@ -17,9 +17,10 @@ pub use config::*;
 
 use chrono::prelude::*;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use hyper::{Body, Request, Response, Server, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::codec::{BytesCodec, FramedRead};
@@ -122,6 +123,7 @@ impl Svc {
                             BgpNet::V6(a) => {
                                 upd.updates6.insert(a.clone());
                             }
+                            _ => {}
                         };
                     };
                 });
@@ -136,6 +138,7 @@ impl Svc {
                             BgpNet::V6(a) => {
                                 upd.withdraws6.insert(a.clone());
                             }
+                            _ => {}
                         }
                     }
                 })
@@ -154,22 +157,59 @@ impl Svc {
                 let urlparts: Vec<&str> = requri.split('/').collect();
                 if urlparts.len() > 2 {
                     match urlparts[2] {
+                        "status" => {
+                            let mut ret = Vec::new();
+                            {
+                                let rib = self.bgprib.lock().await;
+                                let peers = rib.peers.read().await;
+                                write!(&mut ret, "{}", "{'peers':{")?;
+                                let mut first: bool = true;
+                                for pr in peers.peershells.iter() {
+                                    if !first {
+                                        write!(&mut ret, ",")?;
+                                    }
+                                    write!(
+                                        &mut ret,
+                                        "'{}':'{}'",
+                                        pr.0,
+                                        pr.1.read().await.state.read().await
+                                    )?;
+                                    first = false;
+                                }
+                                write!(&mut ret, "{}", "}")?;
+                                write!(
+                                    &mut ret,
+                                    "{}:{},{}:{}{}",
+                                    ",'routes':{'ipv4'",
+                                    rib.ipv4.iter().count(),
+                                    "'ipv6'",
+                                    rib.ipv6.iter().count(),
+                                    "}"
+                                )?;
+                                write!(&mut ret, "{}", "}")?;
+                            }
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .header("Content-type", "text/json")
+                                .body(ret.into())
+                                .unwrap());
+                        }
                         "ping" => {
                             return Ok(Response::new(Body::from("pong")));
                         }
                         "dumprib" => {
-                            let rib=self.bgprib.lock().await;
-                            let mut ret:String=String::new();
+                            let rib = self.bgprib.lock().await;
+                            let mut ret: String = String::new();
                             for i in rib.ipv4.iter() {
-                                ret+=format!("{}\t{}\n",i.0,i.1).as_str();
+                                ret += format!("{}\t{}\n", i.0, i.1).as_str();
                             }
                             for i in rib.ipv6.iter() {
-                                ret+=format!("{}\t{}\n",i.0,i.1).as_str();
+                                ret += format!("{}\t{}\n", i.0, i.1).as_str();
                             }
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)
                                 .body(ret.into())
-                                .unwrap())
+                                .unwrap());
                         }
                         "form_json" => {
                             let (_, body) = req.into_parts();
@@ -244,8 +284,13 @@ impl Svc {
                                 };
                             let mut upd = BgpRibUpdate::new();
                             match net {
-                                BgpNet::V4(v4) => upd.updates4.insert(v4),
-                                BgpNet::V6(v6) => upd.updates6.insert(v6),
+                                BgpNet::V4(v4) => {
+                                    upd.updates4.insert(v4);
+                                }
+                                BgpNet::V6(v6) => {
+                                    upd.updates6.insert(v6);
+                                }
+                                _ => {}
                             };
                             self.bgprib.lock().await.change(upd, dt).await;
                             return Ok(Response::new(Body::from("Done")));
@@ -278,8 +323,13 @@ impl Svc {
                             let dt = Local::now();
                             let mut upd = BgpRibUpdate::new();
                             match net {
-                                BgpNet::V4(v4) => upd.withdraws4.insert(v4),
-                                BgpNet::V6(v6) => upd.withdraws6.insert(v6),
+                                BgpNet::V4(v4) => {
+                                    upd.withdraws4.insert(v4);
+                                }
+                                BgpNet::V6(v6) => {
+                                    upd.withdraws6.insert(v6);
+                                }
+                                _ => {}
                             };
                             self.bgprib.lock().await.change(upd, dt).await;
                             return Ok(Response::new(Body::from("Done")));
@@ -318,7 +368,25 @@ impl Svc {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let conf = match SvcConfig::from_inifile("ban2bgp.ini") {
+    let mut cfgfile: String = "ban2bgp.ini".to_string();
+    let mut argstate: u8 = 0;
+    for stra in std::env::args() {
+        if argstate == 1 {
+            cfgfile = stra.to_string();
+            argstate = 0;
+            continue;
+        };
+        if stra == "-c" {
+            argstate = 1;
+            continue;
+        }
+        if stra == "-h" {
+            eprintln!("-h - this help\n-c inifile - configuration file, ban2bgp.ini default");
+            return Ok(());
+        }
+        argstate = 0;
+    }
+    let conf = match SvcConfig::from_inifile(cfgfile.as_str()) {
         Ok(sc) => Arc::new(Mutex::new(sc)),
         Err(e) => {
             eprintln!("{}", e);
@@ -330,9 +398,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let svc = Arc::new(RwLock::new(Svc::new(conf.clone(), token.clone())));
     let svc1 = svc.clone();
     tokio::task::spawn(async move {
-        eprintln!("Spawn svc run");
         svc1.read().await.run().await;
-        eprintln!("Spawn svc run done");
     });
     {
         let _svc = svc.clone();
