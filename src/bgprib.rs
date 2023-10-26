@@ -135,7 +135,7 @@ impl BgpPeers {
                     None
                 }
             })
-            .for_each(|p| {
+            .for_each_concurrent(10, |p| {
                 let upd1 = upd.clone();
                 async move {
                     p.set_state(PeerState::SendingUpdates).await;
@@ -463,6 +463,7 @@ impl BgpRib {
         });
     }
     async fn check_expires(slf: Arc<Mutex<Self>>) {
+        trace!("RIB check_expires");
         let mut _self = slf.lock().await;
         let mut inupd = BgpRibUpdate::new();
         let now = Local::now();
@@ -480,9 +481,11 @@ impl BgpRib {
             return;
         }
         for v in inupd.withdraws4.iter() {
+            trace!("RIB expires: {}", v);
             _self.ipv4.remove(v);
         }
         for v in inupd.withdraws6.iter() {
+            trace!("RIB expires: {}", v);
             _self.ipv6.remove(v);
         }
         let upd = Arc::new(Mutex::new(inupd));
@@ -509,6 +512,7 @@ impl BgpRib {
         join_all(upds).await;
     }
     async fn check_peers(slf: Arc<Mutex<Self>>) {
+        trace!("RIB check_peers");
         let _self = slf.lock().await;
         let peers = _self.peers.write().await;
         let cnt = peers.count_peers_in_state(PeerState::New).await;

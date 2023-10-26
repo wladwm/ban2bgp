@@ -110,6 +110,7 @@ impl BgpPeer {
         *updq = Some(upd);
     }
     async fn update4(&self, u4: &BgpAddrV4) {
+        trace!("peer {} update4 {}", self.peer, u4);
         if self.mode == PeerMode::FlowSource
             && self.params.check_capability(&BgpCapability::SafiIPv4fu)
         {
@@ -176,6 +177,7 @@ impl BgpPeer {
         };
     }
     async fn withdraw4(&self, u4: &BgpAddrV4) {
+        trace!("peer {} withdraw4 {}", self.peer, u4);
         if self.mode == PeerMode::FlowSource
             && self.params.check_capability(&BgpCapability::SafiIPv4fu)
         {
@@ -239,6 +241,7 @@ impl BgpPeer {
         };
     }
     async fn update6(&self, u6: &BgpAddrV6) {
+        trace!("peer {} update6 {}", self.peer, u6);
         if self.params.check_capability(&BgpCapability::SafiIPv6fu) {
             self.upd(|upd| {
                 for i in upd.attrs.iter_mut() {
@@ -303,6 +306,7 @@ impl BgpPeer {
         };
     }
     async fn withdraw6(&self, u6: &BgpAddrV6) {
+        trace!("peer {} withdraw {}", self.peer, u6);
         if self.params.check_capability(&BgpCapability::SafiIPv6fu) {
             self.upd(|upd| {
                 for i in upd.attrs.iter_mut() {
