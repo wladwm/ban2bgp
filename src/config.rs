@@ -37,6 +37,7 @@ pub struct SvcConfig {
     pub skiplist: Vec<BgpNet>,
     pub communities: BgpCommunityList,
     pub httplisten: std::net::SocketAddr,
+    pub http_files_root: String,
 }
 impl ConfigPeer {
     pub fn from_section(sec: &HashMap<String, Option<String>>) -> Result<ConfigPeer, ErrorConfig> {
@@ -152,8 +153,7 @@ impl SvcConfig {
                 Some(ref s) => s
                     .split(&[',', ' ', '\t'][..])
                     .map(|cs| cs.parse::<SocketAddr>())
-                    .filter(|x| x.is_ok())
-                    .map(|r| r.unwrap())
+                    .filter_map(|r| r.ok())
                     .collect(),
                 None => {
                     vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 179)]
@@ -167,8 +167,7 @@ impl SvcConfig {
                 Some(ref s) => s
                     .split(&[',', ' ', '\t'][..])
                     .map(|cs| cs.parse::<BgpNet>())
-                    .filter(|x| x.is_ok())
-                    .map(|r| r.unwrap())
+                    .filter_map(|r| r.ok())
                     .collect(),
                 None => {
                     vec![]
@@ -188,6 +187,12 @@ impl SvcConfig {
         } else {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8081)
         };
+        let http_files_root: String = if mainsection.contains_key("http_files_root") {
+            mainsection["http_files_root"].as_ref().cloned()
+        } else {
+            None
+        }
+        .unwrap_or("./contrib/".to_string());
         let peers: Vec<ConfigPeer> = if mainsection.contains_key("peers") {
             match mainsection["peers"] {
                 Some(ref s) => s
@@ -201,8 +206,7 @@ impl SvcConfig {
                     })
                     .filter(|x| x.is_some())
                     .map(|sect| ConfigPeer::from_section(sect.unwrap()))
-                    .filter(|x| x.is_ok())
-                    .map(|r| r.unwrap())
+                    .filter_map(|r| r.ok())
                     .collect(),
                 None => Vec::new(),
             }
@@ -255,18 +259,19 @@ impl SvcConfig {
             chrono::Duration::hours(1)
         };
         Ok(SvcConfig {
-            routerid: routerid,
+            routerid,
             activepeers: peers,
             listenat: listen,
             nexthop4: nh4,
             nexthop6: nh6,
             skiplist: skplist,
-            httplisten: httplisten,
+            httplisten,
             communities: cms,
             default_duration: dur,
+            http_files_root,
         })
     }
     pub fn in_skiplist(&self, c: &BgpNet) -> bool {
-        self.skiplist.iter().find(|x| x.contains(c)).is_some()
+        self.skiplist.iter().any(|x| x.contains(c))
     }
 }

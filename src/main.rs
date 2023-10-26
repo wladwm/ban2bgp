@@ -4,6 +4,9 @@ extern crate hyper;
 extern crate tokio;
 #[macro_use]
 extern crate ini;
+#[macro_use]
+extern crate log;
+extern crate pretty_env_logger;
 extern crate url;
 extern crate zettabgp;
 
@@ -27,20 +30,39 @@ use tokio_util::codec::{BytesCodec, FramedRead};
 pub use zettabgp::prelude::*;
 
 static NOTFOUND: &[u8] = b"Not Found";
+static DONE: &[u8] = b"Done";
+pub const HEADER_CONTENT_TYPE: &[u8] = b"Content-Type";
+pub const CONTENT_TYPE_TEXT: &str = "text/plain; charset=utf8";
+pub const CONTENT_TYPE_JSON: &str = "application/json; charset=utf8";
+
 /// HTTP status code 404
 fn not_found() -> Response<Body> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
+        .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_TEXT)
         .body(NOTFOUND.into())
         .unwrap()
 }
-async fn simple_file_send(filename: &str) -> Result<Response<Body>, hyper::Error> {
+/// HTTP status code 200
+fn request_done() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_TEXT)
+        .body(DONE.into())
+        .unwrap()
+}
+async fn simple_file_send(filename: &str) -> Response<Body> {
     if let Ok(file) = tokio::fs::File::open(filename).await {
         let stream = FramedRead::new(file, BytesCodec::new());
         let body = Body::wrap_stream(stream);
-        return Ok(Response::new(body));
+        return Response::builder()
+            .status(StatusCode::OK)
+            //.header(HEADER_CONTENT_TYPE, CONTENT_TYPE_TEXT)
+            .body(body)
+            .unwrap();
     }
-    Ok(not_found())
+    warn!("file {} open error", filename);
+    not_found()
 }
 pub fn get_url_params(req: &Request<Body>) -> HashMap<String, String> {
     req.uri()
@@ -79,11 +101,11 @@ struct HandleNets {
 
 pub struct Svc {
     pub bgprib: Arc<Mutex<BgpRib>>,
-    pub cfg: Arc<Mutex<SvcConfig>>,
+    pub cfg: Arc<SvcConfig>,
     pub cancel: tokio_util::sync::CancellationToken,
 }
 impl Svc {
-    pub fn new(c: Arc<Mutex<SvcConfig>>, cancel_tok: tokio_util::sync::CancellationToken) -> Svc {
+    pub fn new(c: Arc<SvcConfig>, cancel_tok: tokio_util::sync::CancellationToken) -> Svc {
         Svc {
             bgprib: Arc::new(Mutex::new(BgpRib::new(c.clone(), cancel_tok.clone()))),
             cfg: c.clone(),
@@ -97,25 +119,24 @@ impl Svc {
         let q: HandleNets = match serde_json::from_str(req) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("JSON parse error: {:?}", e);
+                warn!("JSON parse error: {:?}", e);
                 return Ok(not_found());
             }
         };
         self.handle_json_msg(&q).await
     }
     async fn handle_json_msg(&self, req: &HandleNets) -> Result<Response<Body>, BgpError> {
-        eprintln!("{:?}", req);
+        debug!("{:?}", req);
         let mut upd = BgpRibUpdate::new();
         let mut dt = Local::now();
         {
-            let cfg = self.cfg.lock().await;
-            dt = dt + cfg.default_duration;
+            dt += self.cfg.default_duration;
             if let Some(ref nadd) = req.add {
                 if let Some(secs) = nadd.duration {
                     dt = Local::now() + chrono::Duration::seconds(secs as i64);
                 };
                 nadd.nets.iter().for_each(|x| {
-                    if !cfg.in_skiplist(x) {
+                    if !self.cfg.in_skiplist(x) {
                         match x {
                             BgpNet::V4(a) => {
                                 upd.updates4.insert(a.clone());
@@ -130,7 +151,7 @@ impl Svc {
             }
             if let Some(ref nrem) = req.remove {
                 nrem.iter().for_each(|x| {
-                    if !cfg.in_skiplist(x) {
+                    if !self.cfg.in_skiplist(x) {
                         match x {
                             BgpNet::V4(a) => {
                                 upd.withdraws4.insert(a.clone());
@@ -147,227 +168,251 @@ impl Svc {
         if !upd.is_empty() {
             self.bgprib.lock().await.change(upd, dt).await;
         }
-        return Ok(Response::new(Body::from("Done")));
+        Ok(request_done())
     }
     pub async fn handle_req(&self, req: Request<Body>) -> Result<Response<Body>, BgpError> {
         let ruri = req.uri().clone();
         let requri = ruri.path();
-        if requri.len() > 5 {
-            if requri[..5] == "/api/"[..5] {
-                let urlparts: Vec<&str> = requri.split('/').collect();
-                if urlparts.len() > 2 {
-                    match urlparts[2] {
-                        "status" => {
-                            let mut ret = Vec::new();
-                            {
-                                let rib = self.bgprib.lock().await;
-                                let peers = rib.peers.read().await;
-                                write!(&mut ret, "{}", "{'peers':{")?;
-                                let mut first: bool = true;
-                                for pr in peers.peershells.iter() {
-                                    if !first {
-                                        write!(&mut ret, ",")?;
-                                    }
-                                    write!(
-                                        &mut ret,
-                                        "'{}':'{}'",
-                                        pr.0,
-                                        pr.1.read().await.state.read().await
-                                    )?;
-                                    first = false;
+        if requri.len() > 5 && requri[..5] == "/api/"[..5] {
+            let urlparts: Vec<&str> = requri.split('/').collect();
+            if urlparts.len() > 2 {
+                match urlparts[2] {
+                    "status" => {
+                        let mut ret = Vec::new();
+                        {
+                            let rib = self.bgprib.lock().await;
+                            let peers = rib.peers.read().await;
+                            write!(&mut ret, "{{'peers':{{")?;
+                            let mut first: bool = true;
+                            for pr in peers.peershells.iter() {
+                                if !first {
+                                    write!(&mut ret, ",")?;
                                 }
-                                write!(&mut ret, "{}", "}")?;
                                 write!(
                                     &mut ret,
-                                    "{}:{},{}:{}{}",
-                                    ",'routes':{'ipv4'",
-                                    rib.ipv4.iter().count(),
-                                    "'ipv6'",
-                                    rib.ipv6.iter().count(),
-                                    "}"
+                                    "'{}':'{}'",
+                                    pr.0,
+                                    pr.1.read().await.state.read().await
                                 )?;
-                                write!(&mut ret, "{}", "}")?;
+                                first = false;
                             }
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .header("Content-type", "text/json")
-                                .body(ret.into())
-                                .unwrap());
+                            write!(&mut ret, "}}")?;
+                            write!(
+                                &mut ret,
+                                ",'routes':{{'ipv4':{},'ipv6':{}}}",
+                                rib.ipv4.len(),
+                                rib.ipv6.len()
+                            )?;
+                            write!(&mut ret, "}}")?;
                         }
-                        "ping" => {
-                            return Ok(Response::new(Body::from("pong")));
+                        Ok(Response::builder()
+                            .status(StatusCode::OK)
+                            .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
+                            .body(ret.into())
+                            .unwrap())
+                    }
+                    "ping" => {
+                        Ok(Response::builder()
+                            .status(StatusCode::OK)
+                            .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_TEXT)
+                            .body("pong".into())
+                            .unwrap())
+                    }
+                    "dumprib" => {
+                        let rib = self.bgprib.lock().await;
+                        let mut ret: String = String::new();
+                        for i in rib.ipv4.iter() {
+                            ret += format!("{}\t{}\n", i.0, i.1).as_str();
                         }
-                        "dumprib" => {
-                            let rib = self.bgprib.lock().await;
-                            let mut ret: String = String::new();
-                            for i in rib.ipv4.iter() {
-                                ret += format!("{}\t{}\n", i.0, i.1).as_str();
+                        for i in rib.ipv6.iter() {
+                            ret += format!("{}\t{}\n", i.0, i.1).as_str();
+                        }
+                        Ok(Response::builder()
+                            .status(StatusCode::OK)
+                            .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_TEXT)
+                            .body(ret.into())
+                            .unwrap())
+                    }
+                    "dumpribjson" => {
+                        let rib = self.bgprib.lock().await;
+                        let mut ret: String = String::new();
+                        ret += "{";
+                        let mut is_first: bool = true;
+                        for i in rib.ipv4.iter() {
+                            if !is_first {
+                                ret.push_str(",\n");
                             }
-                            for i in rib.ipv6.iter() {
-                                ret += format!("{}\t{}\n", i.0, i.1).as_str();
-                            }
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(ret.into())
-                                .unwrap());
+                            ret += format!("\"{}\":\"{}\"", i.0, i.1).as_str();
+                            is_first = false;
                         }
-                        "form_json" => {
-                            let (_, body) = req.into_parts();
-                            let bts = match hyper::body::to_bytes(body).await {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    eprintln!("Body get error: {:?}", e);
-                                    return Ok(not_found());
-                                }
-                            };
-                            let vls = url::form_urlencoded::parse(&bts)
+                        for i in rib.ipv6.iter() {
+                            if !is_first {
+                                ret.push_str(",\n");
+                            }
+                            ret += format!("\"{}\":\"{}\",\n", i.0, i.1).as_str();
+                            is_first = false;
+                        }
+                        ret += "}";
+                        Ok(Response::builder()
+                            .status(StatusCode::OK)
+                            .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
+                            .body(ret.into())
+                            .unwrap())
+                    }
+                    "form_json" => {
+                        let (_, body) = req.into_parts();
+                        let bts = match hyper::body::to_bytes(body).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                error!("Body get error: {:?}", e);
+                                return Ok(not_found());
+                            }
+                        };
+                        let vls = url::form_urlencoded::parse(&bts)
+                            .into_owned()
+                            .collect::<HashMap<String, String>>();
+                        let vl = match vls.get("value") {
+                            None => return Ok(not_found()),
+                            Some(x) => x,
+                        };
+                        self.handle_json_str_msg(vl.as_str()).await
+                    }
+                    "json" => {
+                        let (_, body) = req.into_parts();
+                        let bts = match hyper::body::to_bytes(body).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                error!("Body get error: {:?}", e);
+                                return Ok(not_found());
+                            }
+                        };
+                        let q: HandleNets = match serde_json::from_slice(&bts) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!("JSON parse error: {:?}", e);
+                                return Ok(not_found());
+                            }
+                        };
+                        self.handle_json_msg(&q).await
+                    }
+                    "add" => {
+                        let (_, body) = req.into_parts();
+                        let bts = match hyper::body::to_bytes(body).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!("Body get error: {:?}", e);
+                                return Ok(not_found());
+                            }
+                        };
+                        let mut vls = url::form_urlencoded::parse(&bts)
+                            .into_owned()
+                            .collect::<HashMap<String, String>>();
+                        if vls.is_empty() {
+                            let qry = ruri.query().unwrap_or("");
+                            vls = url::form_urlencoded::parse(qry.as_bytes())
                                 .into_owned()
                                 .collect::<HashMap<String, String>>();
-                            let vl = match vls.get("value") {
-                                None => return Ok(not_found()),
-                                Some(x) => x,
-                            };
-                            return self.handle_json_str_msg(vl.as_str()).await;
                         }
-                        "json" => {
-                            let (_, body) = req.into_parts();
-                            let bts = match hyper::body::to_bytes(body).await {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    eprintln!("Body get error: {:?}", e);
-                                    return Ok(not_found());
-                                }
+                        debug!("{:?}", vls);
+                        let net: BgpNet = vls
+                            .get("net")
+                            .ok_or(BgpError::static_str("missing net"))?
+                            .parse()
+                            .ok()
+                            .ok_or(BgpError::static_str("invalid net"))?;
+                        let dur: u32 = match vls.get("duration") {
+                            None => 0,
+                            Some(s) => s.parse::<u32>().unwrap_or(0),
+                        };
+                        let dt = Local::now()
+                            + if dur == 0 {
+                                self.cfg.default_duration
+                            } else {
+                                chrono::Duration::seconds(dur as i64)
                             };
-                            let q: HandleNets = match serde_json::from_slice(&bts) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    eprintln!("JSON parse error: {:?}", e);
-                                    return Ok(not_found());
-                                }
-                            };
-                            return self.handle_json_msg(&q).await;
-                        }
-                        "add" => {
-                            let (_, body) = req.into_parts();
-                            let bts = match hyper::body::to_bytes(body).await {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    eprintln!("Body get error: {:?}", e);
-                                    return Ok(not_found());
-                                }
-                            };
-                            let mut vls = url::form_urlencoded::parse(&bts)
+                        let mut upd = BgpRibUpdate::new();
+                        match net {
+                            BgpNet::V4(v4) => {
+                                upd.updates4.insert(v4);
+                            }
+                            BgpNet::V6(v6) => {
+                                upd.updates6.insert(v6);
+                            }
+                            _ => {}
+                        };
+                        self.bgprib.lock().await.change(upd, dt).await;
+                        Ok(request_done())
+                    }
+                    "remove" => {
+                        let (_, body) = req.into_parts();
+                        let bts = match hyper::body::to_bytes(body).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                error!("Body get error: {:?}", e);
+                                return Ok(not_found());
+                            }
+                        };
+                        let mut vls = url::form_urlencoded::parse(&bts)
+                            .into_owned()
+                            .collect::<HashMap<String, String>>();
+                        if vls.is_empty() {
+                            let qry = ruri.query().unwrap_or("");
+                            vls = url::form_urlencoded::parse(qry.as_bytes())
                                 .into_owned()
                                 .collect::<HashMap<String, String>>();
-                            if vls.is_empty() {
-                                let qry = ruri.query().unwrap_or("");
-                                vls = url::form_urlencoded::parse(qry.as_bytes())
-                                    .into_owned()
-                                    .collect::<HashMap<String, String>>();
+                        }
+                        debug!("{:?}", vls);
+                        let net: BgpNet = vls
+                            .get("net")
+                            .ok_or(BgpError::static_str("missing net"))?
+                            .parse()
+                            .ok()
+                            .ok_or(BgpError::static_str("invalid net"))?;
+                        let dt = Local::now();
+                        let mut upd = BgpRibUpdate::new();
+                        match net {
+                            BgpNet::V4(v4) => {
+                                upd.withdraws4.insert(v4);
                             }
-                            eprintln!("{:?}", vls);
-                            let net: BgpNet = vls
-                                .get("net")
-                                .ok_or(BgpError::static_str("missing net"))?
-                                .parse()
-                                .ok()
-                                .ok_or(BgpError::static_str("invalid net"))?;
-                            let dur: u32 = match vls.get("duration") {
-                                None => 0,
-                                Some(s) => s.parse::<u32>().unwrap_or(0),
-                            };
-                            let dt = Local::now()
-                                + if dur == 0 {
-                                    self.cfg.lock().await.default_duration
-                                } else {
-                                    chrono::Duration::seconds(dur as i64)
-                                };
-                            let mut upd = BgpRibUpdate::new();
-                            match net {
-                                BgpNet::V4(v4) => {
-                                    upd.updates4.insert(v4);
-                                }
-                                BgpNet::V6(v6) => {
-                                    upd.updates6.insert(v6);
-                                }
-                                _ => {}
-                            };
-                            self.bgprib.lock().await.change(upd, dt).await;
-                            return Ok(Response::new(Body::from("Done")));
-                        }
-                        "remove" => {
-                            let (_, body) = req.into_parts();
-                            let bts = match hyper::body::to_bytes(body).await {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    eprintln!("Body get error: {:?}", e);
-                                    return Ok(not_found());
-                                }
-                            };
-                            let mut vls = url::form_urlencoded::parse(&bts)
-                                .into_owned()
-                                .collect::<HashMap<String, String>>();
-                            if vls.is_empty() {
-                                let qry = ruri.query().unwrap_or("");
-                                vls = url::form_urlencoded::parse(qry.as_bytes())
-                                    .into_owned()
-                                    .collect::<HashMap<String, String>>();
+                            BgpNet::V6(v6) => {
+                                upd.withdraws6.insert(v6);
                             }
-                            eprintln!("{:?}", vls);
-                            let net: BgpNet = vls
-                                .get("net")
-                                .ok_or(BgpError::static_str("missing net"))?
-                                .parse()
-                                .ok()
-                                .ok_or(BgpError::static_str("invalid net"))?;
-                            let dt = Local::now();
-                            let mut upd = BgpRibUpdate::new();
-                            match net {
-                                BgpNet::V4(v4) => {
-                                    upd.withdraws4.insert(v4);
-                                }
-                                BgpNet::V6(v6) => {
-                                    upd.withdraws6.insert(v6);
-                                }
-                                _ => {}
-                            };
-                            self.bgprib.lock().await.change(upd, dt).await;
-                            return Ok(Response::new(Body::from("Done")));
-                        }
-                        _ => {
-                            return Ok(Response::new(Body::from("No service")));
-                        }
+                            _ => {}
+                        };
+                        self.bgprib.lock().await.change(upd, dt).await;
+                        Ok(request_done())
+                    }
+                    _ => {
+                        Ok(not_found())
                     }
                 }
+            } else {
+                Ok(not_found())
             }
-        };
-        return Ok(Response::new(Body::from("Done")));
+        } else {
+            let filepath = String::new()
+                + self.cfg.http_files_root.as_str()
+                + (match requri {
+                    "/" => "/index.html",
+                    s => s,
+                });
+            Ok(simple_file_send(filepath.as_str()).await)
+        }
     }
     pub async fn response_fn(&self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        let requri = req.uri().path();
-        if requri.len() > 5 {
-            return Ok(match self.handle_req(req).await {
-                Ok(r) => r,
-                Err(e) => Response::builder()
-                    .status(StatusCode::OK)
-                    .body(format!("{}", e).into())
-                    .unwrap(),
-            });
-        }
-        let filepath = String::new()
-            + "./"
-            + (match requri {
-                "/" => "/index.html",
-                s => s,
-            });
-        //println!("File {}",filepath);
-        simple_file_send(filepath.as_str()).await
-        //return Ok(not_found());
+        Ok(match self.handle_req(req).await {
+            Ok(r) => r,
+            Err(e) => Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(format!("{}", e).into())
+                .unwrap(),
+        })
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    pretty_env_logger::init_timed();
     let mut cfgfile: String = "ban2bgp.ini".to_string();
     let mut argstate: u8 = 0;
     for stra in std::env::args() {
@@ -387,13 +432,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         argstate = 0;
     }
     let conf = match SvcConfig::from_inifile(cfgfile.as_str()) {
-        Ok(sc) => Arc::new(Mutex::new(sc)),
+        Ok(sc) => Arc::new(sc),
         Err(e) => {
             eprintln!("{}", e);
             return Ok(());
         }
     };
-    let httplisten = conf.lock().await.httplisten.clone();
+    let httplisten = conf.httplisten;
     let token = tokio_util::sync::CancellationToken::new();
     let svc = Arc::new(RwLock::new(Svc::new(conf.clone(), token.clone())));
     let svc1 = svc.clone();
@@ -414,9 +459,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             })
         };
-        println!("Listening on http://{}", httplisten);
+        info!("Listening on http://{}", httplisten);
         if let Err(e) = Server::bind(&httplisten).serve(service).await {
-            eprintln!("server error: {}", e);
+            error!("server error: {}", e);
         }
         token.cancel();
     };

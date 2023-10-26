@@ -4,7 +4,10 @@ ban2bgp
 ## Description
 
 This is a network distributed intrusion prevention system controlled via HTTP API.
-When bad guys tries to knock your servers or routers, their IP can be immediately sent to your network as hotroutes to null for specified amount of time - for all your network.
+When bad guys tries to knock your servers or routers, their IP can be immediately blocked for specified amount of time for all your network by two ways:
+1. bad IP's announced as as hotroutes to null to your RR's, so bad guys will not got responses.
+2. bad IP's announced as flowspec rules, blocking any traffic from these addresses.
+Please be caution with attack sources, because some session-less protocols like DNS is not recommended as attack source, because source IP's can be easy spoofed.
 
 
 ## Quick start
@@ -44,20 +47,27 @@ httplisten=0.0.0.0:8080
 listen=0.0.0.0:1179
 nexthop=198.18.0.1
 communities=666:666
-peers=10.0.0.1 AS65535
+peers=r1
 duration=3600
 skiplist=10.0.0.0/24
+
+[peer_r1]
+peer=10.0.0.1
+as=65535
+mode=blackhole
 EOF
 
-$ cargo run
+$ RUST_LOG=info cargo run
 Listening on http://0.0.0.0:8080
 Connecting to 10.0.0.1:179
 Connected to 10.0.0.1:179
 ```
 
 After this you can check on your router that BGP session with 10.1.1.1 is established.
-Add denyroute for host 10.2.2.2 for an hour:
+Add denyroute for host 10.2.2.2 for an hour via http request:
 /usr/bin/curl http://127.0.0.1:8080/api/add?net=10.2.2.2&dur=3600
+
+Or you can use bundled minimal SPA by pointing your browser to http://127.0.0.1:8080/
 
 In ther contrib folder you can find an example configuration for fail2ban.
 when you specify in the jain config 
@@ -74,13 +84,19 @@ ban2bgp looks for configuration in file ban2bgp.ini in current directory.
 This file have on [main] section
 Main section parameters:
 * httplisten - bind address and port for inner http server, default 0.0.0.0:8080.
-* listen - not necessary BGP listen point, default 0.0.0.0:179, wich required root privileges because 179<1024.
+* http_files_root - http serve files from this location, default ./contrib/
+* listen - not necessary BGP listen point, default 0.0.0.0:179, which required root privileges because 179<1024.
 * nexthop - ipv4 nexthop for denied routes. All your routers should have this routed to Null.
 * nexthop6 - ipv6 nexthop for denied routes.
 * communities - spaced-separated communites list for denied routes.
-* peers - comma-separated list for BGP peers. Each peer has form [ip] AS<as number>.
+* peers - comma-separated (or space- or tab-separated) list for BGP peers. Each peer should have a separate section in ini file.
 * duration - default denied route time to live in seconds.
 * skiplist - comma-separated list for networks, which are skipped in add requests.
+Peer section parameters:
+* peer - peer ip address
+* as - peer AS
+* mode - peer mode - blackhole or flowspec
+
 
 ## API endpoints
 
@@ -108,6 +124,9 @@ Main section parameters:
     
 * /api/dumprib
   Returns text table with active routes and times
+
+* /api/dumpribjson
+  Returns json object with active routes and times
 
 ## Crates.io
 

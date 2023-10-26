@@ -63,7 +63,7 @@ impl std::fmt::Display for BgpPeerShell {
 impl BgpPeerShell {
     pub fn new(peer: BgpPeer) -> Arc<RwLock<BgpPeerShell>> {
         Arc::new(RwLock::new(BgpPeerShell {
-            peer: peer,
+            peer,
             state: Arc::new(RwLock::new(PeerState::New)),
         }))
     }
@@ -96,14 +96,11 @@ impl BgpPeers {
         peer: Arc<RwLock<BgpPeerShell>>,
     ) -> Option<Arc<RwLock<BgpPeerShell>>> {
         if self.peershells.get(&adr).is_some() {
-            eprintln!("Try to add duplicate peer at {}", adr);
+            error!("Try to add duplicate peer at {}", adr);
             return None;
         }
         self.peershells.insert(adr, peer);
-        match self.peershells.get(&adr) {
-            None => None,
-            Some(x) => Some(x.clone()),
-        }
+        self.peershells.get(&adr).cloned()
     }
     pub fn removepeershell(&mut self, adr: &IpAddr) {
         self.peershells.remove(adr);
@@ -118,7 +115,7 @@ impl BgpPeers {
                 async move {
                     let peer = x.1.read().await;
                     if peer.is_state(temp_st).await {
-                        Some(1 as usize)
+                        Some(1_usize)
                     } else {
                         None
                     }
@@ -150,20 +147,17 @@ impl BgpPeers {
     }
 }
 pub struct BgpRib {
-    pub cfg: Arc<Mutex<SvcConfig>>,
+    pub cfg: Arc<SvcConfig>,
     pub ipv4: BTreeMap<BgpAddrV4, DateTime<Local>>,
     pub ipv6: BTreeMap<BgpAddrV6, DateTime<Local>>,
     pub peers: Arc<RwLock<BgpPeers>>,
     pub cancel: tokio_util::sync::CancellationToken,
 }
 impl BgpRib {
-    pub fn new(
-        config: Arc<Mutex<SvcConfig>>,
-        cancel_tok: tokio_util::sync::CancellationToken,
-    ) -> BgpRib {
+    pub fn new(cfg: Arc<SvcConfig>, cancel: tokio_util::sync::CancellationToken) -> BgpRib {
         BgpRib {
-            cfg: config,
-            cancel: cancel_tok,
+            cfg,
+            cancel,
             ipv4: BTreeMap::new(),
             ipv6: BTreeMap::new(),
             peers: Arc::new(RwLock::new(BgpPeers::new())),
@@ -227,7 +221,7 @@ impl BgpRib {
         } else {
             TcpSocket::new_v6()?
         };
-        let routerid = self.cfg.lock().await.routerid.clone();
+        let routerid = self.cfg.routerid;
         let bgpparams = if sockaddr.is_ipv4() {
             BgpSessionParams::new(
                 0,
@@ -274,13 +268,13 @@ impl BgpRib {
                         match res {
                           Ok(acc) => acc,
                           Err(e) => {
-                            eprintln!("Accept error: {}", e);
+                            error!("Accept error: {}", e);
                             continue;
                           }
                         }
                     }
                 };
-                eprintln!("Connected from {}", client.1);
+                info!("Connected from {}", client.1);
                 let peershell = BgpPeerShell::new(
                     BgpPeer::new(
                         client.1,
@@ -293,7 +287,7 @@ impl BgpRib {
                 );
                 let mut scs: bool = true;
                 if let Err(e) = peershell.write().await.peer.start_passive().await {
-                    eprintln!("failed to create BGP peer; err = {:?}", e);
+                    error!("failed to create BGP peer; err = {:?}", e);
                     scs = false;
                 }
                 if scs {
@@ -303,12 +297,12 @@ impl BgpRib {
                         .addpeershell(client.1.ip(), peershell.clone())
                     {
                         let cancel_tok1 = cancel_tok.clone();
-                        let claddr = client.1.clone();
+                        let claddr = client.1;
                         let peers1 = peers.clone();
                         tokio::task::spawn(async move {
                             peer_shell.read().await.peer.lifecycle(cancel_tok1).await;
                             peers1.write().await.removepeershell(&claddr.ip());
-                            println!("Session done {}", claddr);
+                            info!("Session done {}", claddr);
                         });
                     } else {
                         scs = false;
@@ -323,14 +317,14 @@ impl BgpRib {
         Ok(())
     }
     async fn connectto(
-        cfg: Arc<Mutex<SvcConfig>>,
+        cfg: Arc<SvcConfig>,
         peers: Arc<RwLock<BgpPeers>>,
         sockaddr: SocketAddr,
         mode: PeerMode,
         asn: u32,
         cancel: tokio_util::sync::CancellationToken,
     ) -> tokio::io::Result<()> {
-        eprintln!("Connecting to {}", sockaddr);
+        info!("Connecting to {}", sockaddr);
         let peertcp = select! {
             _ = cancel.cancelled() => {
                 return Ok(());
@@ -344,8 +338,8 @@ impl BgpRib {
                     }
             }
         };
-        eprintln!("Connected to {}", sockaddr);
-        let routerid = cfg.lock().await.routerid.clone();
+        info!("Connected to {}", sockaddr);
+        let routerid = cfg.routerid;
         let bgpparams = match sockaddr {
             SocketAddr::V4(_) => BgpSessionParams::new(
                 asn,
@@ -383,38 +377,33 @@ impl BgpRib {
         );
         let mut scs: bool = true;
         if let Err(e) = peershell.write().await.peer.start_active().await {
-            eprintln!("failed to create BGP peer; err = {:?}", e);
+            error!("failed to create BGP peer; err = {:?}", e);
             scs = false;
         }
         if scs {
-            if peers
+            scs = peers
                 .write()
                 .await
                 .addpeershell(sockaddr.ip(), peershell.clone())
-                .is_some()
-            {
-                scs = true
-            } else {
-                scs = false
-            }
+                .is_some();
         };
         if scs {
             peershell.read().await.peer.lifecycle(cancel.clone()).await;
             peers.write().await.removepeershell(&sockaddr.ip());
-            println!("Session done {}", sockaddr);
+            info!("Session done {}", sockaddr);
         }
         peershell.write().await.peer.close().await;
         Ok(())
     }
     pub async fn start(slf: Arc<Mutex<Self>>) {
         let _self = slf.lock().await;
-        let listenat = _self.cfg.lock().await.listenat.clone();
+        let listenat = _self.cfg.listenat.clone();
         for sockaddr in listenat.into_iter() {
-            if let Err(e) = _self.listenat(sockaddr.clone()).await {
-                eprintln!("Error listen at {} - {}", sockaddr, e);
+            if let Err(e) = _self.listenat(sockaddr).await {
+                error!("Error listen at {} - {}", sockaddr, e);
             };
         }
-        let activepeers = _self.cfg.lock().await.activepeers.clone();
+        let activepeers = _self.cfg.activepeers.clone();
         let peers = _self.peers.write().await;
         for cfgp in activepeers.into_iter() {
             if !peers.hasip(&cfgp.peeraddr) {

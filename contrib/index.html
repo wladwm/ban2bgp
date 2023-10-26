@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+ <head>
+  <title>BAN2bgp</title>
+  <meta http-equiv="content-type" content="text/html; charset=utf8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script type="text/javascript">
+    var cnt_queries_running = 0;
+    class ApiQuery {
+      debounce_timeout = null;
+      xhr = null;
+      is_query_running = false;
+      pending_url = "";
+      on_done = null;
+      on_query_started = null;
+      on_query_finished = null;
+      on_state_changed = null;
+      debounce_time = 1000;
+      constructor(on_state_changed) {
+        this.xhr = new XMLHttpRequest();
+        this.xhr.onreadystatechange = this.onXhrStateChange.bind(this);
+        this.xhr.onerror = this.onXhrStateError.bind(this);
+        this.xhr.timeout = 120000;
+        this.on_state_changed=on_state_changed;
+      }
+      debounce(func, wait) {
+        var context = this, args = arguments;
+        if (this.debounce_timeout) clearTimeout(this.debounce_timeout);
+        let self = this;
+        this.debounce_timeout = setTimeout(function () {
+          self.debounce_timeout = null;
+          func.apply(context, args);
+        }, wait);
+      }
+      onQueryRunning(qstate) {
+        this.is_query_running = qstate;
+        if (qstate) {
+          if (cnt_queries_running == 0) {
+            if(this.on_state_changed) this.on_state_changed(false);
+            //document.getElementById('inprogress')?.style.display = 'block';
+            //document.getElementById('querybtn')?.style.enabled = false;
+          }
+          cnt_queries_running++;
+          if (this.on_query_started) this.on_query_started(event);
+        } else {
+          cnt_queries_running--;
+          if (cnt_queries_running == 0) {
+            if(this.on_state_changed) this.on_state_changed(true);
+            //document.getElementById('inprogress')?.style.display = 'none';
+            //document.getElementById('querybtn')?.style.enabled = true;
+          }
+          if (this.on_query_finished) this.on_query_finished(event);
+        };
+      }
+      onXhrStateChange(event) {
+        if (event.target.readyState == 4) {
+          this.onQueryRunning(false);
+          if (event.target.status == 0) {
+            //retry
+            this.debounce(() => {
+              this.executeQuery();
+            }, 1000);
+            return;
+          }
+          this.on_done(event);
+        }
+      }
+      onXhrStateError(event) {
+        this.onQueryRunning(false);
+        console.error("Request error - ", event);
+      }
+      executeQuery() {
+        if (this.query_running) return;
+        if (this.debounce_timeout) clearTimeout(this.debounce_timeout);
+        this.debounce_timeout = null;
+        this.xhr.open('GET', this.pending_url, true);
+        this.xhr.send();
+        this.onQueryRunning(true);
+      }
+      Query(func, url) {
+        if (this.is_query_running)
+          this.xhr.abort();
+        //this.is_query_running=false;
+        this.debounce(() => {
+          this.pending_url = url;
+          this.on_done = func;
+          this.executeQuery();
+        }, this.debounce_time);
+      }
+    };
+  </script>
+  <script type="text/javascript">
+    var queryApi = new ApiQuery((act_enab)=>{
+        let inprog=document.getElementById('inprogress');
+        let btn_names=['add1','remove1'];
+        let qbtn=document.getElementById('add1');
+        if (qbtn) qbtn.style.enabled=act_enab;
+        btn_names.forEach((btnnm)=>{
+            let qbtn=document.getElementById(btnnm);
+            if (qbtn) qbtn.style.enabled=act_enab;
+        });
+        if (inprog) inprog.style.display=act_enab ? 'none':'block';
+    });
+    function escapeHTML(s) {
+      let q = s;
+      if (typeof q == "object") q=JSON.stringify(q);
+      return ("" + q).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+    }
+    function request_rib(){
+        queryApi.Query((event)=>{
+            if (event.target.status == 200) {
+             const rtxt = event.target.responseText;
+             try {
+                const result = JSON.parse(rtxt);
+                let tbl = '<table class="tbl"><caption>Blocked addresses list</caption><thead><tr><th>Address</th><th>Blocked till</th></tr></thead><tbody>';
+                if (!Object.keys(result).length) {
+                    tbl+="<tr><td colspan=2>No blocked addresses</td></tr>";
+                } else {
+                    for (const [key, value] of Object.entries(result)) {
+                        let ekey=escapeHTML(key);
+                        tbl+='<tr><td><a href="#" title="unblock" OnClick='+"'"+'remove_addr("'+ekey+'")'+"'>"+ekey+"</a></td><td>"+escapeHTML(value)+"</td></tr>";
+                    }
+                };
+                tbl+="</tbody></table>";
+                document.getElementById('lastrib').innerHTML=tbl;
+             } catch (err) {
+              console.error(err);
+              console.log(rtxt);
+              document.getElementById('lastrib').innerHTML=escapeHTML(rtxt);
+             }
+            }
+        },"/api/dumpribjson")
+    }
+    var requestTimer=null;
+    function postpone_request_rib(){
+        if(requestTimer) clearTimeout(requestTimer);
+        requestTimer=setTimeout(()=>{
+            requestTimer=null;
+            request_rib();
+        },500);
+    }
+    function add_single_addr(){
+        let net=document.getElementById('block1_addr').value;
+        let dur=document.getElementById('block1_dur').value;
+        if (net.len<1) return;
+        let uri='/api/add?net='+encodeURIComponent(net)+'&dur='+encodeURIComponent(dur);
+        queryApi.Query((event)=>{
+            console.log(event);
+            if (event.target.status == 200) {
+             console.log(event.target.responseText);
+             document.getElementById('block1_addr').value='';
+             postpone_request_rib();
+            }
+        },uri);
+    }
+    function remove_addr(addr){
+        if (addr.len<1) return;
+        let uri='/api/remove?net='+encodeURIComponent(addr);
+        queryApi.Query((event)=>{
+            console.log(event);
+            if (event.target.status == 200) {
+             console.log(event.target.responseText);
+             document.getElementById('block1_addr').value='';
+             postpone_request_rib();
+            }
+        },uri);
+    }
+    function remove_single_addr(){
+        remove_addr(document.getElementById('unblock1_addr').value);
+    }
+  </script>
+  <style>
+TABLE.tbl {
+ margin-bottom: 1em;
+ border: groove 1px #C3D9FF;
+ border-collapse: collapse;
+ background-color: #E8EEF7;
+}
+TABLE.tbl CAPTION {
+ background-color: #E0ECFF;
+}
+TABLE.tbl THEAD {
+background: #e0ecff; /* Old browsers */
+background: -moz-linear-gradient(top, #e0ecff 0%, #f9fbff 53%, #e8eef7 100%); /* FF3.6-15 */
+background: -webkit-linear-gradient(top, #e0ecff 0%,#f9fbff 53%,#e8eef7 100%); /* Chrome10-25,Safari5.1-6 */
+background: linear-gradient(to bottom, #e0ecff 0%,#f9fbff 53%,#e8eef7 100%); /* W3C, IE10+, FF16+, Chrome26+, Opera12+, Safari7+ */
+filter: progid:DXImageTransform.Microsoft.gradient( startColorstr='#e0ecff', endColorstr='#e8eef7',GradientType=0 ); /* IE6-9 */
+}
+TABLE.tbl TH {
+font-weight:bold;
+background: #e0ecff; /* Old browsers */
+background: -moz-linear-gradient(top, #e0ecff 0%, #f9fbff 53%, #e8eef7 100%); /* FF3.6-15 */
+background: -webkit-linear-gradient(top, #e0ecff 0%,#f9fbff 53%,#e8eef7 100%); /* Chrome10-25,Safari5.1-6 */
+background: linear-gradient(to bottom, #e0ecff 0%,#f9fbff 53%,#e8eef7 100%); /* W3C, IE10+, FF16+, Chrome26+, Opera12+, Safari7+ */
+filter: progid:DXImageTransform.Microsoft.gradient( startColorstr='#e0ecff', endColorstr='#e8eef7',GradientType=0 ); /* IE6-9 */
+border-left:none; border-top:none; border-right:solid 1px #C3D9FF; border-bottom:solid 1px #C3D9FF;
+padding-right: 4px;
+
+}
+TABLE.tbl TD {
+border-left:none;
+border-top:none;
+border-right:solid 1px #C3D9FF;
+border-bottom:solid 1px #C3D9FF;
+padding-right: 4px;
+}
+  </style>
+ </head>
+<body OnLoad="request_rib()">
+<img id='inprogress' src='wait.svg' border='0' style='display:none;position:fixed;width:32px;height:32px'>
+<div>Block single address:<input type='text' id='block1_addr' placeholder='198.19.2.2'> for <input type='text' id='block1_dur' placeholder='600' value="600"> <button id='add1' OnClick="add_single_addr()">Add</button></div>
+<div>Remove block for single address:<input type='text' id='unblock1_addr' placeholder='198.19.2.2'><button id='remove1' OnClick="remove_single_addr()">Remove</button></div>
+<pre id="lastrib"></pre>
+<form method="post" enctype="application/x-www-form-urlencoded" action="/api/json/">
+  <div>Add json:</div>
+  <div><textarea style='width:90%;height:100px' name='value'></textarea></div>
+  <input type='submit'>
+  </form>
+</body>
+</html>

@@ -13,7 +13,7 @@ struct UpdCnt {
     cnt: usize,
 }
 pub struct BgpPeer {
-    cfg: Arc<Mutex<SvcConfig>>,
+    cfg: Arc<SvcConfig>,
     peer: std::net::SocketAddr,
     mode: PeerMode,
     nhop: std::net::IpAddr,
@@ -42,18 +42,18 @@ impl BgpPeer {
     pub async fn new(
         peer: std::net::SocketAddr,
         mode: PeerMode,
-        cfgarc: Arc<Mutex<SvcConfig>>,
+        cfgarc: Arc<SvcConfig>,
         pars: BgpSessionParams,
         stream: tokio::net::TcpStream,
     ) -> BgpPeer {
         let (tx, rx) = channel(100);
         BgpPeer {
-            peer: peer,
-            mode: mode,
+            peer,
+            mode,
             cfg: cfgarc.clone(),
             nhop: match pars.peer_mode {
-                BgpTransportMode::IPv4 => std::net::IpAddr::V4(cfgarc.lock().await.nexthop4),
-                BgpTransportMode::IPv6 => std::net::IpAddr::V6(cfgarc.lock().await.nexthop6),
+                BgpTransportMode::IPv4 => std::net::IpAddr::V4(cfgarc.nexthop4),
+                BgpTransportMode::IPv6 => std::net::IpAddr::V6(cfgarc.nexthop6),
             },
             params: pars,
             peersock: Arc::new(Mutex::new(stream)),
@@ -70,7 +70,7 @@ impl BgpPeer {
                 match self.snd.lock().await.send(u.upd).await {
                     Ok(_) => {}
                     Err(e) => {
-                        eprintln!("Error send update: {}", e);
+                        error!("Error send update: {}", e);
                     }
                 }
             } else {
@@ -93,10 +93,9 @@ impl BgpPeer {
             }
         )));
         */
-        let cfg = self.cfg.lock().await;
-        if !cfg.communities.value.is_empty() {
+        if !self.cfg.communities.value.is_empty() {
             msg.attrs
-                .push(BgpAttrItem::CommunityList(cfg.communities.clone()));
+                .push(BgpAttrItem::CommunityList(self.cfg.communities.clone()));
         };
         msg.attrs
             .push(BgpAttrItem::NextHop(BgpNextHop::new(self.nhop)));
@@ -111,28 +110,28 @@ impl BgpPeer {
         *updq = Some(upd);
     }
     async fn update4(&self, u4: &BgpAddrV4) {
-        if self.mode == PeerMode::FlowSource {
-            if self.params.check_capability(&BgpCapability::SafiIPv4fu) {
-                self.upd(|upd| {
-                    for i in upd.attrs.iter_mut() {
-                        match i {
-                            BgpAttrItem::MPUpdates(u) => {
-                                if let BgpAddrs::FS4U(ref mut v) = u.addrs {
-                                    v.push(BgpFlowSpec::PrefixSrc(u4.clone()));
-                                }
-                                return;
+        if self.mode == PeerMode::FlowSource
+            && self.params.check_capability(&BgpCapability::SafiIPv4fu)
+        {
+            self.upd(|upd| {
+                for i in upd.attrs.iter_mut() {
+                    match i {
+                        BgpAttrItem::MPUpdates(u) => {
+                            if let BgpAddrs::FS4U(ref mut v) = u.addrs {
+                                v.push(BgpFlowSpec::PrefixSrc(u4.clone()));
                             }
-                            _ => {}
+                            return;
                         }
+                        _ => {}
                     }
-                    upd.attrs.push(BgpAttrItem::MPUpdates(BgpMPUpdates {
-                        nexthop: BgpAddr::None,
-                        addrs: BgpAddrs::FS4U(vec![BgpFlowSpec::PrefixSrc(u4.clone())]),
-                    }));
-                })
-                .await;
-                return;
-            };
+                }
+                upd.attrs.push(BgpAttrItem::MPUpdates(BgpMPUpdates {
+                    nexthop: BgpAddr::None,
+                    addrs: BgpAddrs::FS4U(vec![BgpFlowSpec::PrefixSrc(u4.clone())]),
+                }));
+            })
+            .await;
+            return;
         };
         match self.params.peer_mode {
             BgpTransportMode::IPv4 => {
@@ -147,7 +146,7 @@ impl BgpPeer {
             }
             BgpTransportMode::IPv6 => {
                 if self.params.check_capability(&BgpCapability::SafiIPv4lu) {
-                    let nhop4 = self.cfg.lock().await.nexthop4;
+                    let nhop4 = self.cfg.nexthop4;
                     self.upd(|upd| {
                         for i in upd.attrs.iter_mut() {
                             match i {
@@ -177,27 +176,27 @@ impl BgpPeer {
         };
     }
     async fn withdraw4(&self, u4: &BgpAddrV4) {
-        if self.mode == PeerMode::FlowSource {
-            if self.params.check_capability(&BgpCapability::SafiIPv4fu) {
-                self.upd(|upd| {
-                    for i in upd.attrs.iter_mut() {
-                        match i {
-                            BgpAttrItem::MPWithdraws(u) => {
-                                if let BgpAddrs::FS4U(ref mut v) = u.addrs {
-                                    v.push(BgpFlowSpec::PrefixSrc(u4.clone()));
-                                }
-                                return;
+        if self.mode == PeerMode::FlowSource
+            && self.params.check_capability(&BgpCapability::SafiIPv4fu)
+        {
+            self.upd(|upd| {
+                for i in upd.attrs.iter_mut() {
+                    match i {
+                        BgpAttrItem::MPWithdraws(u) => {
+                            if let BgpAddrs::FS4U(ref mut v) = u.addrs {
+                                v.push(BgpFlowSpec::PrefixSrc(u4.clone()));
                             }
-                            _ => {}
+                            return;
                         }
+                        _ => {}
                     }
-                    upd.attrs.push(BgpAttrItem::MPWithdraws(BgpMPWithdraws {
-                        addrs: BgpAddrs::FS4U(vec![BgpFlowSpec::PrefixSrc(u4.clone())]),
-                    }));
-                })
-                .await;
-                return;
-            };
+                }
+                upd.attrs.push(BgpAttrItem::MPWithdraws(BgpMPWithdraws {
+                    addrs: BgpAddrs::FS4U(vec![BgpFlowSpec::PrefixSrc(u4.clone())]),
+                }));
+            })
+            .await;
+            return;
         };
         match self.params.peer_mode {
             BgpTransportMode::IPv4 => {
@@ -274,7 +273,7 @@ impl BgpPeer {
             }
             BgpTransportMode::IPv4 => {
                 if self.params.check_capability(&BgpCapability::SafiIPv6lu) {
-                    let nhop6 = self.cfg.lock().await.nexthop6;
+                    let nhop6 = self.cfg.nexthop6;
                     self.upd(|upd| {
                         for i in upd.attrs.iter_mut() {
                             match i {
@@ -392,11 +391,11 @@ impl BgpPeer {
         &self,
         sck: &mut tokio::net::TcpStream,
     ) -> Result<(BgpMessageType, usize), BgpError> {
-        let mut buf = [0 as u8; 19];
+        let mut buf = [0_u8; 19];
         sck.read_exact(&mut buf).await?;
         self.params.decode_message_head(&buf)
     }
-    fn get_message_body_ref<'b>(buf: &'b mut [u8]) -> Result<&'b mut [u8], BgpError> {
+    fn get_message_body_ref(buf: &mut [u8]) -> Result<&mut [u8], BgpError> {
         if buf.len() < 19 {
             return Err(BgpError::insufficient_buffer_size());
         }
@@ -419,7 +418,7 @@ impl BgpPeer {
     }
     pub async fn start_passive(&mut self) -> Result<(), BgpError> {
         let mut bom = BgpOpenMessage::new();
-        let mut buf = [255 as u8; 4096];
+        let mut buf = [255_u8; 4096];
         let mut sck = self.peersock.lock().await;
         let msg = match self.recv_message_head(&mut sck).await {
             Err(e) => return Err(e),
@@ -445,7 +444,7 @@ impl BgpPeer {
     }
     pub async fn start_active(&mut self) -> Result<(), BgpError> {
         let mut bom = self.params.open_message();
-        let mut buf = [255 as u8; 4096];
+        let mut buf = [255_u8; 4096];
         let sz = match bom.encode_to(&self.params, BgpPeer::get_message_body_ref(&mut buf)?) {
             Err(e) => {
                 return Err(e);
@@ -471,7 +470,7 @@ impl BgpPeer {
         Ok(())
     }
     pub async fn send_keepalive(&self) -> Result<(), BgpError> {
-        let mut buf = [255 as u8; 19];
+        let mut buf = [255_u8; 19];
         let blen = self
             .params
             .prepare_message_buf(&mut buf, BgpMessageType::Keepalive, 0)?;
@@ -486,7 +485,7 @@ impl BgpPeer {
         }
     }
     pub async fn lifecycle(&self, cancel: tokio_util::sync::CancellationToken) {
-        let mut buf = Box::new([255 as u8; 65535]);
+        let mut buf = Box::new([255_u8; 65535]);
         let keep_interval = chrono::Duration::seconds((self.params.hold_time / 3) as i64);
         loop {
             let mut tosleep = Local::now() - *self.keepalive_sent.read().await;
@@ -494,7 +493,7 @@ impl BgpPeer {
                 match self.send_keepalive().await {
                     Ok(_) => {}
                     Err(e) => {
-                        eprintln!("Keepalive send error: {:?}", e);
+                        error!("Keepalive send error: {:?}", e);
                     }
                 }
                 tosleep = Local::now() - *self.keepalive_sent.read().await;
@@ -519,7 +518,7 @@ impl BgpPeer {
                         if let Some(upd) = updrcv {
                             need_send = match upd.encode_to(&self.params, &mut buf[19..]) {
                                 Err(e) => {
-                                    eprintln!("bgp update encode error: {}",e);
+                                    error!("bgp update encode error: {}",e);
                                     continue;
                                 }
                                 Ok(sz) => sz,
@@ -530,7 +529,7 @@ impl BgpPeer {
                     msgin = self.recv_message_head(&mut sck) => {
                         match msgin {
                             Err(e) => {
-                                eprintln!("recv_message_head: {:?}", e);
+                                error!("recv_message_head: {:?}", e);
                                 break;
                             }
                             Ok(msg) => {
@@ -547,7 +546,7 @@ impl BgpPeer {
                     .await
                 {
                     Err(e) => {
-                        eprintln!("bgp update encode error: {}", e);
+                        error!("bgp update encode error: {}", e);
                     }
                     Ok(_) => {}
                 }
@@ -565,7 +564,7 @@ impl BgpPeer {
                     }
                     rs = sck.read_exact(&mut buf[0..msg.1]) => {
                         if let Err(e) = rs {
-                            eprintln!("receve message body error: {:?}", e);
+                            error!("receve message body error: {:?}", e);
                             break;
                         }
                     }
@@ -573,23 +572,23 @@ impl BgpPeer {
             };
             match msg.0 {
                 BgpMessageType::Open => {
-                    eprintln!("Incorrect open message!");
+                    error!("Incorrect open message!");
                     break;
                 }
                 BgpMessageType::Keepalive => match self.send_keepalive().await {
                     Ok(_) => {}
                     Err(e) => {
-                        eprintln!("Keepalive sending error: {:?}", e);
+                        error!("Keepalive sending error: {:?}", e);
                     }
                 },
                 BgpMessageType::Notification => {
                     let mut msgnotification = BgpNotificationMessage::new();
                     match msgnotification.decode_from(&self.params, &buf[0..msg.1]) {
                         Err(e) => {
-                            eprintln!("BGP notification decode error: {:?}", e);
+                            error!("BGP notification decode error: {:?}", e);
                         }
                         Ok(_) => {
-                            println!(
+                            debug!(
                                 "BGP notification: {:?} - {:?}",
                                 msgnotification,
                                 msgnotification.error_text()
@@ -601,7 +600,7 @@ impl BgpPeer {
                 BgpMessageType::Update => {
                     let mut msgupdate = BgpUpdateMessage::new();
                     if let Err(e) = msgupdate.decode_from(&self.params, &buf[0..msg.1]) {
-                        eprintln!("BGP update decode error: {:?}", e);
+                        warn!("BGP update decode error: {:?}", e);
                         continue;
                     }
                     //ignore incoming update message
@@ -613,7 +612,7 @@ impl BgpPeer {
         match self.peersock.lock().await.shutdown().await {
             Ok(_) => {}
             Err(e) => {
-                println!("Warning: socket shutdown error: {}", e)
+                error!("Warning: socket shutdown error: {}", e)
             }
         }
     }
