@@ -211,13 +211,11 @@ impl Svc {
                             .body(ret.into())
                             .unwrap())
                     }
-                    "ping" => {
-                        Ok(Response::builder()
-                            .status(StatusCode::OK)
-                            .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_TEXT)
-                            .body("pong".into())
-                            .unwrap())
-                    }
+                    "ping" => Ok(Response::builder()
+                        .status(StatusCode::OK)
+                        .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_TEXT)
+                        .body("pong".into())
+                        .unwrap()),
                     "dumprib" => {
                         let rib = self.bgprib.lock().await;
                         let mut ret: String = String::new();
@@ -320,10 +318,12 @@ impl Svc {
                             .parse()
                             .ok()
                             .ok_or(BgpError::static_str("invalid net"))?;
-                        let dur: u32 = match vls.get("duration") {
-                            None => 0,
-                            Some(s) => s.parse::<u32>().unwrap_or(0),
-                        };
+                        let dur: u32 = vls
+                            .get("duration")
+                            .or(vls.get("dur"))
+                            .map(|s| s.parse().ok())
+                            .flatten()
+                            .unwrap_or(0);
                         let dt = Local::now()
                             + if dur == 0 {
                                 self.cfg.default_duration
@@ -382,9 +382,7 @@ impl Svc {
                         self.bgprib.lock().await.change(upd, dt).await;
                         Ok(request_done())
                     }
-                    _ => {
-                        Ok(not_found())
-                    }
+                    _ => Ok(not_found()),
                 }
             } else {
                 Ok(not_found())
