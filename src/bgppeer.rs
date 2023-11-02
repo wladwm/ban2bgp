@@ -14,6 +14,7 @@ struct UpdCnt {
 }
 pub struct BgpPeer {
     cfg: Arc<SvcConfig>,
+    localas: u32,
     peer: std::net::SocketAddr,
     mode: PeerMode,
     nhop: std::net::IpAddr,
@@ -40,6 +41,7 @@ impl std::fmt::Debug for BgpPeer {
 
 impl BgpPeer {
     pub async fn new(
+        localas: u32,
         peer: std::net::SocketAddr,
         mode: PeerMode,
         cfgarc: Arc<SvcConfig>,
@@ -48,6 +50,7 @@ impl BgpPeer {
     ) -> BgpPeer {
         let (tx, rx) = channel(100);
         BgpPeer {
+            localas,
             peer,
             mode,
             cfg: cfgarc.clone(),
@@ -82,7 +85,11 @@ impl BgpPeer {
         msg.attrs.push(BgpAttrItem::Origin(BgpOrigin::new(
             BgpAttrOrigin::Incomplete,
         )));
-        msg.attrs.push(BgpAttrItem::ASPath(BgpASpath::new()));
+        if self.localas==0 || self.localas==self.params.as_num {
+          msg.attrs.push(BgpAttrItem::ASPath(BgpASpath::new()));
+        } else {
+          msg.attrs.push(BgpAttrItem::ASPath(BgpASpath::from(vec![self.localas])));
+        }
         msg.attrs
             .push(BgpAttrItem::LocalPref(BgpLocalpref::new(10)));
         /*

@@ -95,6 +95,7 @@ Main section parameters:
 Peer section parameters:
 * peer - peer ip address
 * as - peer AS
+* localas - unnecessary, local AS number  if it not the same as peer AS
 * mode - peer mode - blackhole or flowspec
 
 

@@ -277,6 +277,7 @@ impl BgpRib {
                 info!("Connected from {}", client.1);
                 let peershell = BgpPeerShell::new(
                     BgpPeer::new(
+                        0,
                         client.1,
                         PeerMode::Blackhole,
                         cfg.clone(),
@@ -322,6 +323,7 @@ impl BgpRib {
         sockaddr: SocketAddr,
         mode: PeerMode,
         asn: u32,
+        localas: u32,
         cancel: tokio_util::sync::CancellationToken,
     ) -> tokio::io::Result<()> {
         info!("Connecting to {}", sockaddr);
@@ -373,7 +375,7 @@ impl BgpRib {
             ),
         };
         let peershell = BgpPeerShell::new(
-            BgpPeer::new(sockaddr, mode, cfg.clone(), bgpparams.clone(), peertcp).await,
+            BgpPeer::new(localas, sockaddr, mode, cfg.clone(), bgpparams.clone(), peertcp).await,
         );
         let mut scs: bool = true;
         if let Err(e) = peershell.write().await.peer.start_active().await {
@@ -416,7 +418,7 @@ impl BgpRib {
                             _ = cancel_tok.cancelled() => {
                                 break;
                             }
-                            _ = BgpRib::connectto(cfg.clone(),peers.clone(),SocketAddr::new(cfgp.peeraddr, 179),cfgp.mode.clone(),cfgp.peeras,cancel_tok.clone()) => {
+                            _ = BgpRib::connectto(cfg.clone(),peers.clone(),SocketAddr::new(cfgp.peeraddr, 179),cfgp.mode.clone(),cfgp.peeras,cfgp.localas,cancel_tok.clone()) => {
                             }
                         };
                         select! {

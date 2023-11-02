@@ -24,6 +24,7 @@ impl FromStr for PeerMode {
 pub struct ConfigPeer {
     pub peeraddr: IpAddr,
     pub peeras: u32,
+    pub localas: u32,
     pub mode: PeerMode,
 }
 #[derive(Debug, Clone)]
@@ -47,21 +48,28 @@ impl ConfigPeer {
         if !sec.contains_key("as") {
             return Err(ErrorConfig::from_str("missing peer as number"));
         };
-        let peer: IpAddr = match sec["peer"] {
-            Some(ref s) => match s.parse() {
+        let peeraddr: IpAddr = match sec.get("peer").map(|s| s.as_ref().map(|s| s.as_str())).flatten() {
+            Some(s) => match s.parse() {
                 Ok(q) => q,
                 Err(_) => return Err(ErrorConfig::from_str("invalid peer IP address")),
             },
             None => return Err(ErrorConfig::from_str("missing peer IP address")),
         };
-        let asn: u32 = match sec["as"] {
-            Some(ref s) => match s.parse() {
+        let peeras: u32 = match sec.get("as").map(|s| s.as_ref().map(|s| s.as_str())).flatten() {
+            Some(s) => match s.parse() {
                 Ok(q) => q,
                 Err(_) => return Err(ErrorConfig::from_str("invalid peer as number")),
             },
             None => return Err(ErrorConfig::from_str("missing peer as number")),
         };
-        let pmode: PeerMode = if sec.contains_key("mode") {
+        let localas: u32 = match sec.get("localas").map(|s| s.as_ref().map(|s| s.as_str())).flatten() {
+            Some(s) => match s.parse() {
+                Ok(q) => q,
+                Err(_) => return Err(ErrorConfig::from_str("invalid local as number")),
+            },
+            None => peeras,
+        };
+        let mode: PeerMode = if sec.contains_key("mode") {
             match sec["mode"] {
                 Some(ref s) => match s.parse() {
                     Ok(q) => q,
@@ -73,9 +81,10 @@ impl ConfigPeer {
             PeerMode::Blackhole
         };
         Ok(ConfigPeer {
-            peeraddr: peer,
-            peeras: asn,
-            mode: pmode,
+            peeraddr,
+            peeras,
+            localas,
+            mode,
         })
     }
 }
