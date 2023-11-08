@@ -49,6 +49,7 @@ impl BgpPeer {
         stream: tokio::net::TcpStream,
     ) -> BgpPeer {
         let (tx, rx) = channel(100);
+        debug!("BgpPeer::new local as {} peer as {}", localas, pars.as_num);
         BgpPeer {
             localas,
             peer,
@@ -85,10 +86,11 @@ impl BgpPeer {
         msg.attrs.push(BgpAttrItem::Origin(BgpOrigin::new(
             BgpAttrOrigin::Incomplete,
         )));
-        if self.localas==0 || self.localas==self.params.as_num {
-          msg.attrs.push(BgpAttrItem::ASPath(BgpASpath::new()));
+        if self.localas == 0 || self.localas == self.params.as_num {
+            msg.attrs.push(BgpAttrItem::ASPath(BgpASpath::new()));
         } else {
-          msg.attrs.push(BgpAttrItem::ASPath(BgpASpath::from(vec![self.localas])));
+            msg.attrs
+                .push(BgpAttrItem::ASPath(BgpASpath::from(vec![self.localas])));
         }
         msg.attrs
             .push(BgpAttrItem::LocalPref(BgpLocalpref::new(10)));
@@ -427,6 +429,21 @@ impl BgpPeer {
             Err(e) => Err(e.into()),
         }
     }
+    fn get_my_bom(&self) -> BgpOpenMessage {
+        let mut bom = self.params.open_message();
+        if self.localas != 0 {
+            bom.as_num = self.localas;
+            for c in bom.caps.iter_mut() {
+                match c {
+                    BgpCapability::CapASN32(ref mut n) => {
+                        *n = self.localas;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        bom
+    }
     pub async fn start_passive(&mut self) -> Result<(), BgpError> {
         let mut bom = BgpOpenMessage::new();
         let mut buf = [255_u8; 4096];
@@ -440,11 +457,18 @@ impl BgpPeer {
         }
         sck.read_exact(&mut buf[0..msg.1]).await?;
         bom.decode_from(&self.params, &buf[0..msg.1])?;
-        bom.router_id = self.params.router_id;
-        self.params.as_num = bom.as_num;
+        if self.params.as_num != 0 && self.params.as_num != bom.as_num {
+            warn!(
+                "Mismatch peer AS number: got {} while expecting {}",
+                bom.as_num, self.params.as_num
+            );
+        }
+        if self.params.as_num == 0 {
+            self.params.as_num = bom.as_num;
+        }
         self.params.hold_time = bom.hold_time;
         self.params.match_caps(&bom.caps);
-        bom = self.params.open_message();
+        bom = self.get_my_bom();
         let sz = match bom.encode_to(&self.params, BgpPeer::get_message_body_ref(&mut buf)?) {
             Err(e) => return Err(e),
             Ok(sz) => sz,
@@ -454,7 +478,7 @@ impl BgpPeer {
         Ok(())
     }
     pub async fn start_active(&mut self) -> Result<(), BgpError> {
-        let mut bom = self.params.open_message();
+        let mut bom = self.get_my_bom();
         let mut buf = [255_u8; 4096];
         let sz = match bom.encode_to(&self.params, BgpPeer::get_message_body_ref(&mut buf)?) {
             Err(e) => {
@@ -471,11 +495,18 @@ impl BgpPeer {
             }
             Ok(msg) => msg,
         };
+        debug!("Recv {:?}", msg);
         if msg.0 != BgpMessageType::Open {
             return Err(BgpError::static_str("Invalid state to start_active"));
         }
         sck.read_exact(&mut buf[0..msg.1]).await?;
         bom.decode_from(&self.params, &buf[0..msg.1])?;
+        if self.params.as_num != 0 && self.params.as_num != bom.as_num {
+            warn!(
+                "Mismatch peer AS number: got {} while expecting {}",
+                bom.as_num, self.params.as_num
+            );
+        }
         self.params.hold_time = bom.hold_time;
         self.params.match_caps(&bom.caps);
         Ok(())
