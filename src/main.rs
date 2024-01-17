@@ -13,10 +13,12 @@ extern crate zettabgp;
 pub mod bgppeer;
 pub mod bgprib;
 pub mod config;
+pub mod fltitem;
 
 pub use bgppeer::*;
 pub use bgprib::*;
 pub use config::*;
+use fltitem::FilterItem;
 
 use chrono::prelude::*;
 use hyper::service::{make_service_fn, service_fn};
@@ -90,13 +92,13 @@ pub fn get_url_param<T: std::str::FromStr>(
 #[derive(Debug, Serialize, Deserialize)]
 struct NetsAdd {
     duration: Option<u32>,
-    nets: Vec<BgpNet>,
+    nets: Vec<FilterItem>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct HandleNets {
     add: Option<NetsAdd>,
-    remove: Option<Vec<BgpNet>>,
+    remove: Option<Vec<FilterItem>>,
 }
 
 pub struct Svc {
@@ -136,31 +138,15 @@ impl Svc {
                     dt = Local::now() + chrono::Duration::seconds(secs as i64);
                 };
                 nadd.nets.iter().for_each(|x| {
-                    if !self.cfg.in_skiplist(x) {
-                        match x {
-                            BgpNet::V4(a) => {
-                                upd.updates4.insert(a.clone());
-                            }
-                            BgpNet::V6(a) => {
-                                upd.updates6.insert(a.clone());
-                            }
-                            _ => {}
-                        };
+                    if !self.cfg.in_skiplist(&x.net) {
+                        x.update_to(&mut upd);
                     };
                 });
             }
             if let Some(ref nrem) = req.remove {
                 nrem.iter().for_each(|x| {
-                    if !self.cfg.in_skiplist(x) {
-                        match x {
-                            BgpNet::V4(a) => {
-                                upd.withdraws4.insert(a.clone());
-                            }
-                            BgpNet::V6(a) => {
-                                upd.withdraws6.insert(a.clone());
-                            }
-                            _ => {}
-                        }
+                    if !self.cfg.in_skiplist(&x.net) {
+                        x.withdraw_to(&mut upd);
                     }
                 })
             };
@@ -312,7 +298,7 @@ impl Svc {
                                 .collect::<HashMap<String, String>>();
                         }
                         debug!("{:?}", vls);
-                        let net: BgpNet = vls
+                        let net: FilterItem = vls
                             .get("net")
                             .ok_or(BgpError::static_str("missing net"))?
                             .parse()
@@ -331,15 +317,7 @@ impl Svc {
                                 chrono::Duration::seconds(dur as i64)
                             };
                         let mut upd = BgpRibUpdate::new();
-                        match net {
-                            BgpNet::V4(v4) => {
-                                upd.updates4.insert(v4);
-                            }
-                            BgpNet::V6(v6) => {
-                                upd.updates6.insert(v6);
-                            }
-                            _ => {}
-                        };
+                        net.update_to(&mut upd);
                         self.bgprib.lock().await.change(upd, dt).await;
                         Ok(request_done())
                     }
@@ -362,7 +340,7 @@ impl Svc {
                                 .collect::<HashMap<String, String>>();
                         }
                         debug!("{:?}", vls);
-                        let net: BgpNet = vls
+                        let net: FilterItem = vls
                             .get("net")
                             .ok_or(BgpError::static_str("missing net"))?
                             .parse()
@@ -370,15 +348,7 @@ impl Svc {
                             .ok_or(BgpError::static_str("invalid net"))?;
                         let dt = Local::now();
                         let mut upd = BgpRibUpdate::new();
-                        match net {
-                            BgpNet::V4(v4) => {
-                                upd.withdraws4.insert(v4);
-                            }
-                            BgpNet::V6(v6) => {
-                                upd.withdraws6.insert(v6);
-                            }
-                            _ => {}
-                        };
+                        net.withdraw_to(&mut upd);
                         self.bgprib.lock().await.change(upd, dt).await;
                         Ok(request_done())
                     }

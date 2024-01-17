@@ -9,6 +9,9 @@ When bad guys tries to knock your servers or routers, their IP can be immediatel
 2. bad IP's announced as flowspec rules, blocking any traffic from these addresses.
 Please be caution with attack sources, because some session-less protocols like DNS is not recommended as attack source, because source IP's can be easy spoofed.
 
+When no filtering direction (src/dst) specified, it assumed both.
+Blackhole routing obviously supports only dst.
+Flowspec filtering supports src and dst filtering.
 
 ## Quick start
 
@@ -114,7 +117,7 @@ Peer section parameters:
   Block operation. Requires a valid JSON Object in POST body with optional keys "add" and "remove".
   remove - an array of string routes to be removed, add - an object with "duration" and "nets". "nets" - an array of string routes to be added for "duration" seconds.
   Example:
-  {"add":{"duration":86400,"nets":["33.3.3.3"]},"remove":["11.1.1.1","22.2.2.2"]}
+  {"add":{"duration":86400,"nets":["dst 33.3.3.3"]},"remove":["11.1.1.1","22.2.2.2"]}
 
 * /api/ping
   Checks service liveness. Returns "pong"

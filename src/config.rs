@@ -48,21 +48,33 @@ impl ConfigPeer {
         if !sec.contains_key("as") {
             return Err(ErrorConfig::from_str("missing peer as number"));
         };
-        let peeraddr: IpAddr = match sec.get("peer").map(|s| s.as_ref().map(|s| s.as_str())).flatten() {
+        let peeraddr: IpAddr = match sec
+            .get("peer")
+            .map(|s| s.as_ref().map(|s| s.as_str()))
+            .flatten()
+        {
             Some(s) => match s.parse() {
                 Ok(q) => q,
                 Err(_) => return Err(ErrorConfig::from_str("invalid peer IP address")),
             },
             None => return Err(ErrorConfig::from_str("missing peer IP address")),
         };
-        let peeras: u32 = match sec.get("as").map(|s| s.as_ref().map(|s| s.as_str())).flatten() {
+        let peeras: u32 = match sec
+            .get("as")
+            .map(|s| s.as_ref().map(|s| s.as_str()))
+            .flatten()
+        {
             Some(s) => match s.parse() {
                 Ok(q) => q,
                 Err(_) => return Err(ErrorConfig::from_str("invalid peer as number")),
             },
             None => return Err(ErrorConfig::from_str("missing peer as number")),
         };
-        let localas: u32 = match sec.get("localas").map(|s| s.as_ref().map(|s| s.as_str())).flatten() {
+        let localas: u32 = match sec
+            .get("localas")
+            .map(|s| s.as_ref().map(|s| s.as_str()))
+            .flatten()
+        {
             Some(s) => match s.parse() {
                 Ok(q) => q,
                 Err(_) => return Err(ErrorConfig::from_str("invalid local as number")),

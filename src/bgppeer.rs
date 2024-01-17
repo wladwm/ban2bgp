@@ -118,17 +118,21 @@ impl BgpPeer {
         upd.cnt += 1;
         *updq = Some(upd);
     }
-    async fn update4(&self, u4: &BgpAddrV4) {
+    async fn update4(&self, u4: &FilterTarget<BgpAddrV4>) {
         trace!("peer {} update4 {}", self.peer, u4);
         if self.mode == PeerMode::FlowSource
             && self.params.check_capability(&BgpCapability::SafiIPv4fu)
         {
             self.upd(|upd| {
+                let bfs = match u4.direction {
+                    FilterDirection::Src => BgpFlowSpec::PrefixSrc(u4.addr.clone()),
+                    FilterDirection::Dst => BgpFlowSpec::PrefixDst(u4.addr.clone()),
+                };
                 for i in upd.attrs.iter_mut() {
                     match i {
                         BgpAttrItem::MPUpdates(u) => {
                             if let BgpAddrs::FS4U(ref mut v) = u.addrs {
-                                v.push(BgpFlowSpec::PrefixSrc(u4.clone()));
+                                v.push(bfs);
                             }
                             return;
                         }
@@ -137,19 +141,22 @@ impl BgpPeer {
                 }
                 upd.attrs.push(BgpAttrItem::MPUpdates(BgpMPUpdates {
                     nexthop: BgpAddr::None,
-                    addrs: BgpAddrs::FS4U(vec![BgpFlowSpec::PrefixSrc(u4.clone())]),
+                    addrs: BgpAddrs::FS4U(vec![bfs]),
                 }));
             })
             .await;
             return;
         };
+        if u4.direction != FilterDirection::Dst {
+            return;
+        }
         match self.params.peer_mode {
             BgpTransportMode::IPv4 => {
                 self.upd(|upd| {
                     if let BgpAddrs::IPV4U(ref mut x) = upd.updates {
-                        x.push(u4.clone());
+                        x.push(u4.addr.clone());
                     } else {
-                        upd.updates = BgpAddrs::IPV4U(vec![u4.clone()]);
+                        upd.updates = BgpAddrs::IPV4U(vec![u4.addr.clone()]);
                     }
                 })
                 .await;
@@ -164,7 +171,7 @@ impl BgpPeer {
                                     if let BgpAddrs::IPV4LU(ref mut v) = u.addrs {
                                         v.push(Labeled::<BgpAddrV4>::new(
                                             MplsLabels::fromvec(vec![3]),
-                                            u4.clone(),
+                                            u4.addr.clone(),
                                         ));
                                     }
                                     return;
@@ -176,7 +183,7 @@ impl BgpPeer {
                             nexthop: BgpAddr::V4(nhop4),
                             addrs: BgpAddrs::IPV4LU(vec![Labeled::<BgpAddrV4>::new(
                                 MplsLabels::fromvec(vec![3]),
-                                u4.clone(),
+                                u4.addr.clone(),
                             )]),
                         }));
                     })
@@ -185,17 +192,21 @@ impl BgpPeer {
             }
         };
     }
-    async fn withdraw4(&self, u4: &BgpAddrV4) {
+    async fn withdraw4(&self, u4: &FilterTarget<BgpAddrV4>) {
         trace!("peer {} withdraw4 {}", self.peer, u4);
         if self.mode == PeerMode::FlowSource
             && self.params.check_capability(&BgpCapability::SafiIPv4fu)
         {
             self.upd(|upd| {
+                let bfs = match u4.direction {
+                    FilterDirection::Src => BgpFlowSpec::PrefixSrc(u4.addr.clone()),
+                    FilterDirection::Dst => BgpFlowSpec::PrefixDst(u4.addr.clone()),
+                };
                 for i in upd.attrs.iter_mut() {
                     match i {
                         BgpAttrItem::MPWithdraws(u) => {
                             if let BgpAddrs::FS4U(ref mut v) = u.addrs {
-                                v.push(BgpFlowSpec::PrefixSrc(u4.clone()));
+                                v.push(bfs)
                             }
                             return;
                         }
@@ -203,19 +214,22 @@ impl BgpPeer {
                     }
                 }
                 upd.attrs.push(BgpAttrItem::MPWithdraws(BgpMPWithdraws {
-                    addrs: BgpAddrs::FS4U(vec![BgpFlowSpec::PrefixSrc(u4.clone())]),
+                    addrs: BgpAddrs::FS4U(vec![bfs]),
                 }));
             })
             .await;
             return;
         };
+        if u4.direction != FilterDirection::Dst {
+            return;
+        }
         match self.params.peer_mode {
             BgpTransportMode::IPv4 => {
                 self.upd(|upd| {
                     if let BgpAddrs::IPV4U(ref mut x) = upd.withdraws {
-                        x.push(u4.clone());
+                        x.push(u4.addr.clone());
                     } else {
-                        upd.withdraws = BgpAddrs::IPV4U(vec![u4.clone()]);
+                        upd.withdraws = BgpAddrs::IPV4U(vec![u4.addr.clone()]);
                     }
                 })
                 .await;
@@ -229,7 +243,7 @@ impl BgpPeer {
                                     if let BgpAddrs::IPV4LU(ref mut v) = u.addrs {
                                         v.push(Labeled::<BgpAddrV4>::new(
                                             MplsLabels::fromvec(vec![3]),
-                                            u4.clone(),
+                                            u4.addr.clone(),
                                         ));
                                     }
                                     return;
@@ -240,7 +254,7 @@ impl BgpPeer {
                         upd.attrs.push(BgpAttrItem::MPWithdraws(BgpMPWithdraws {
                             addrs: BgpAddrs::IPV4LU(vec![Labeled::<BgpAddrV4>::new(
                                 MplsLabels::fromvec(vec![3]),
-                                u4.clone(),
+                                u4.addr.clone(),
                             )]),
                         }));
                     })
@@ -249,15 +263,19 @@ impl BgpPeer {
             }
         };
     }
-    async fn update6(&self, u6: &BgpAddrV6) {
+    async fn update6(&self, u6: &FilterTarget<BgpAddrV6>) {
         trace!("peer {} update6 {}", self.peer, u6);
         if self.params.check_capability(&BgpCapability::SafiIPv6fu) {
             self.upd(|upd| {
+                let bfs = match u6.direction {
+                    FilterDirection::Src => BgpFlowSpec::PrefixSrc(FS6::new(0, u6.addr.clone())),
+                    FilterDirection::Dst => BgpFlowSpec::PrefixDst(FS6::new(0, u6.addr.clone())),
+                };
                 for i in upd.attrs.iter_mut() {
                     match i {
                         BgpAttrItem::MPUpdates(u) => {
                             if let BgpAddrs::FS6U(ref mut v) = u.addrs {
-                                v.push(BgpFlowSpec::PrefixSrc(FS6::new(0, u6.clone())));
+                                v.push(bfs);
                             }
                             return;
                         }
@@ -266,19 +284,22 @@ impl BgpPeer {
                 }
                 upd.attrs.push(BgpAttrItem::MPUpdates(BgpMPUpdates {
                     nexthop: BgpAddr::None,
-                    addrs: BgpAddrs::FS6U(vec![BgpFlowSpec::PrefixSrc(FS6::new(0, u6.clone()))]),
+                    addrs: BgpAddrs::FS6U(vec![bfs]),
                 }));
             })
             .await;
             return;
         };
+        if u6.direction != FilterDirection::Dst {
+            return;
+        }
         match self.params.peer_mode {
             BgpTransportMode::IPv6 => {
                 self.upd(|upd| {
                     if let BgpAddrs::IPV6U(ref mut x) = upd.updates {
-                        x.push(u6.clone());
+                        x.push(u6.addr.clone());
                     } else {
-                        upd.updates = BgpAddrs::IPV6U(vec![u6.clone()]);
+                        upd.updates = BgpAddrs::IPV6U(vec![u6.addr.clone()]);
                     }
                 })
                 .await;
@@ -293,7 +314,7 @@ impl BgpPeer {
                                     if let BgpAddrs::IPV6LU(ref mut v) = u.addrs {
                                         v.push(Labeled::<BgpAddrV6>::new(
                                             MplsLabels::fromvec(vec![2]),
-                                            u6.clone(),
+                                            u6.addr.clone(),
                                         ));
                                     }
                                     break;
@@ -305,7 +326,7 @@ impl BgpPeer {
                             nexthop: BgpAddr::V6(nhop6),
                             addrs: BgpAddrs::IPV6LU(vec![Labeled::<BgpAddrV6>::new(
                                 MplsLabels::fromvec(vec![2]),
-                                u6.clone(),
+                                u6.addr.clone(),
                             )]),
                         }));
                     })
@@ -314,15 +335,19 @@ impl BgpPeer {
             }
         };
     }
-    async fn withdraw6(&self, u6: &BgpAddrV6) {
+    async fn withdraw6(&self, u6: &FilterTarget<BgpAddrV6>) {
         trace!("peer {} withdraw {}", self.peer, u6);
         if self.params.check_capability(&BgpCapability::SafiIPv6fu) {
             self.upd(|upd| {
+                let bfs = match u6.direction {
+                    FilterDirection::Src => BgpFlowSpec::PrefixSrc(FS6::new(0, u6.addr.clone())),
+                    FilterDirection::Dst => BgpFlowSpec::PrefixDst(FS6::new(0, u6.addr.clone())),
+                };
                 for i in upd.attrs.iter_mut() {
                     match i {
                         BgpAttrItem::MPWithdraws(u) => {
                             if let BgpAddrs::FS6U(ref mut v) = u.addrs {
-                                v.push(BgpFlowSpec::PrefixSrc(FS6::new(0, u6.clone())));
+                                v.push(bfs);
                             }
                             return;
                         }
@@ -330,19 +355,22 @@ impl BgpPeer {
                     }
                 }
                 upd.attrs.push(BgpAttrItem::MPWithdraws(BgpMPWithdraws {
-                    addrs: BgpAddrs::FS6U(vec![BgpFlowSpec::PrefixSrc(FS6::new(0, u6.clone()))]),
+                    addrs: BgpAddrs::FS6U(vec![bfs]),
                 }));
             })
             .await;
             return;
         };
+        if u6.direction != FilterDirection::Dst {
+            return;
+        }
         match self.params.peer_mode {
             BgpTransportMode::IPv6 => {
                 self.upd(|upd| {
                     if let BgpAddrs::IPV6U(ref mut x) = upd.withdraws {
-                        x.push(u6.clone());
+                        x.push(u6.addr.clone());
                     } else {
-                        upd.withdraws = BgpAddrs::IPV6U(vec![u6.clone()]);
+                        upd.withdraws = BgpAddrs::IPV6U(vec![u6.addr.clone()]);
                     }
                 })
                 .await;
@@ -356,7 +384,7 @@ impl BgpPeer {
                                     if let BgpAddrs::IPV6LU(ref mut v) = u.addrs {
                                         v.push(Labeled::<BgpAddrV6>::new(
                                             MplsLabels::fromvec(vec![2]),
-                                            u6.clone(),
+                                            u6.addr.clone(),
                                         ));
                                     }
                                     break;
@@ -367,7 +395,7 @@ impl BgpPeer {
                         upd.attrs.push(BgpAttrItem::MPWithdraws(BgpMPWithdraws {
                             addrs: BgpAddrs::IPV6LU(vec![Labeled::<BgpAddrV6>::new(
                                 MplsLabels::fromvec(vec![2]),
-                                u6.clone(),
+                                u6.addr.clone(),
                             )]),
                         }));
                     })

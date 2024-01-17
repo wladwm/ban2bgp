@@ -3,6 +3,8 @@ use chrono::prelude::*;
 use futures::future::join_all;
 use futures::stream::{self, StreamExt};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::{Debug, Display};
+use std::hash::Hash;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpSocket;
@@ -10,12 +12,52 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::*;
 use zettabgp::prelude::*;
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FilterDirection {
+    Src,
+    Dst,
+}
+impl Display for FilterDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FilterDirection::Src => f.write_str("src"),
+            FilterDirection::Dst => f.write_str("dst"),
+        }
+    }
+}
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FilterTarget<B: Sized + Debug + Clone + Hash + PartialEq + Eq + PartialOrd + Ord> {
+    pub direction: FilterDirection,
+    pub addr: B,
+}
+impl<B: Sized + Debug + Clone + Hash + PartialEq + Eq + PartialOrd + Ord> FilterTarget<B> {
+    pub fn new(direction: FilterDirection, addr: B) -> FilterTarget<B> {
+        FilterTarget { direction, addr }
+    }
+}
+impl<B: Sized + Debug + Clone + Hash + PartialEq + Eq + PartialOrd + Ord> std::convert::From<B>
+    for FilterTarget<B>
+{
+    fn from(addr: B) -> FilterTarget<B> {
+        FilterTarget {
+            direction: FilterDirection::Dst,
+            addr,
+        }
+    }
+}
+impl<B: Sized + Debug + Clone + Hash + PartialEq + Eq + PartialOrd + Ord + Display> Display
+    for FilterTarget<B>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.direction, self.addr)
+    }
+}
 #[derive(Debug)]
 pub struct BgpRibUpdate {
-    pub updates4: BTreeSet<BgpAddrV4>,
-    pub withdraws4: BTreeSet<BgpAddrV4>,
-    pub updates6: BTreeSet<BgpAddrV6>,
-    pub withdraws6: BTreeSet<BgpAddrV6>,
+    pub updates4: BTreeSet<FilterTarget<BgpAddrV4>>,
+    pub withdraws4: BTreeSet<FilterTarget<BgpAddrV4>>,
+    pub updates6: BTreeSet<FilterTarget<BgpAddrV6>>,
+    pub withdraws6: BTreeSet<FilterTarget<BgpAddrV6>>,
 }
 impl BgpRibUpdate {
     pub fn new() -> BgpRibUpdate {
@@ -43,10 +85,10 @@ pub enum PeerState {
 impl std::fmt::Display for PeerState {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            PeerState::New => "New".fmt(f),
-            PeerState::SendingRIB => "SendingRIB".fmt(f),
-            PeerState::InSync => "InSync".fmt(f),
-            PeerState::SendingUpdates => "SendingUpdates".fmt(f),
+            PeerState::New => f.write_str("New"),
+            PeerState::SendingRIB => f.write_str("SendingRIB"),
+            PeerState::InSync => f.write_str("InSync"),
+            PeerState::SendingUpdates => f.write_str("SendingUpdates"),
         }
     }
 }
@@ -56,7 +98,7 @@ pub struct BgpPeerShell {
 }
 impl std::fmt::Display for BgpPeerShell {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        self.peer.fmt(f)
+        write!(f, "{}", self.peer)
     }
 }
 
@@ -148,8 +190,8 @@ impl BgpPeers {
 }
 pub struct BgpRib {
     pub cfg: Arc<SvcConfig>,
-    pub ipv4: BTreeMap<BgpAddrV4, DateTime<Local>>,
-    pub ipv6: BTreeMap<BgpAddrV6, DateTime<Local>>,
+    pub ipv4: BTreeMap<FilterTarget<BgpAddrV4>, DateTime<Local>>,
+    pub ipv6: BTreeMap<FilterTarget<BgpAddrV6>, DateTime<Local>>,
     pub peers: Arc<RwLock<BgpPeers>>,
     pub cancel: tokio_util::sync::CancellationToken,
 }
@@ -166,18 +208,25 @@ impl BgpRib {
     pub async fn change(&mut self, msg: BgpRibUpdate, till: chrono::DateTime<Local>) {
         let mut checked = BgpRibUpdate::new();
         for adr in msg.withdraws4.iter() {
-            for v in self.ipv4.range(adr..=&BgpAddrV4::new(adr.range_last(), 32)) {
-                if adr.in_subnet(&v.0.addr) {
+            for v in self.ipv4.range(
+                adr..=&FilterTarget {
+                    direction: adr.direction,
+                    addr: BgpAddrV4::new(adr.addr.range_last(), 32),
+                },
+            ) {
+                if adr.addr.in_subnet(&v.0.addr.addr) {
                     checked.withdraws4.insert(v.0.clone());
                 }
             }
         }
         for adr in msg.withdraws6.iter() {
-            for v in self
-                .ipv6
-                .range(adr..=&BgpAddrV6::new(adr.range_last(), 128))
-            {
-                if adr.in_subnet(&v.0.addr) {
+            for v in self.ipv6.range(
+                adr..=&FilterTarget {
+                    direction: adr.direction,
+                    addr: BgpAddrV6::new(adr.addr.range_last(), 128),
+                },
+            ) {
+                if adr.addr.in_subnet(&v.0.addr.addr) {
                     checked.withdraws6.insert(v.0.clone());
                 }
             }
@@ -375,7 +424,15 @@ impl BgpRib {
             ),
         };
         let peershell = BgpPeerShell::new(
-            BgpPeer::new(localas, sockaddr, mode, cfg.clone(), bgpparams.clone(), peertcp).await,
+            BgpPeer::new(
+                localas,
+                sockaddr,
+                mode,
+                cfg.clone(),
+                bgpparams.clone(),
+                peertcp,
+            )
+            .await,
         );
         let mut scs: bool = true;
         if let Err(e) = peershell.write().await.peer.start_active().await {
